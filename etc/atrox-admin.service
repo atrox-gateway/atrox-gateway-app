@@ -1,0 +1,25 @@
+# /etc/system/systemd/atrox-admin.service
+
+[Unit]
+Description=Atrox Gateway - Secure Administration Service
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+# --- CONFIGURACION DE SEGURIDAD Y PRIVILEGIOS ---
+User=mgmt-service
+Group=mgmt-service
+ExecStart=/usr/bin/node /opt/atrox-gateway/packages/backend/atrox-admin-services/server.js
+Restart=always
+RestartSec=5s
+
+# --- INYECCION DE SECRETOS ---
+Environment="NODE_ENV=development"
+Environment="PORT=3001" 
+Environment="JWT_SECRET_KEY=YOUR_LONG_RANDOM_SECRET" 
+Environment="REDIS_URL=redis://127.0.0.1:6379"
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+# /etc/system/systemd/atrox.service
+
+[Unit]
+Description=Atrox Gateway - Gatekeeper Service (Auth and PUN Management)
+Requires=network-online.target redis-server.service
+After=network-online.target redis-server.service
+
+[Service]
+# --- CONFIGURACION DE SEGURIDAD Y PRIVILEGIOS ---
+User=atroxgateway 
+Group=atroxgateway
+# Ejecutar el binario de Node.js
+ExecStart=/usr/bin/node /opt/atrox-gateway/packages/backend/atrox-services/server.js
+Restart=always
+RestartSec=5s
+
+# --- INYECCION DE SECRETOS ---
+Environment="NODE_ENV=development"
+Environment="PORT=3000"
+Environment="JWT_SECRET_KEY=YOUR_LONG_RANDOM_SECRET" 
+Environment="REDIS_URL=redis://127.0.0.1:6379"
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

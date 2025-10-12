@@ -1,0 +1,27 @@
+# /etc/nginx/sites-available/default
+
+server {
+	listen 80 default_server;
+	server_name _;
+
+	# Redirige el login y la raíz al servidor "portero"
+	location /login {
+		proxy_pass http://127.0.0.1:3000;
+		proxy_set_header Host $host;
+	}
+    location / {
+		proxy_pass http://127.0.0.1:3000;
+		proxy_set_header Host $host;
+	}
+
+	# Redirige las peticiones a la API al PUN correcto basado en la cookie
+	location /api/ {
+        if ($user_backend = "") {
+            return 401 'No Autorizado: Inicie sesión primero';
+        }
+		proxy_pass http://$user_backend;
+		proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+		proxy_set_header Host $host;
+	}
+}
