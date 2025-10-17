@@ -2,5 +2,5 @@ atroxgateway ALL=NOPASSWD: /bin/bash
 atroxgateway ALL=NOPASSWD: /usr/sbin/nginx -s reload
 atroxgateway ALL=NOPASSWD: /opt/atrox-gateway/scripts/update_nginx_config.sh *
 atroxgateway ALL=NOPASSWD: /usr/bin/node /opt/atrox-gateway/packages/backend/atrox-user-pun/user-server.js
-mgmt-service ALL=NOPASSWD: /opt/atrox-gateway/scripts/manage_user.sh *
+atroxgateway ALL=NOPASSWD: /opt/atrox-gateway/scripts/manage_user.sh *
 Defaults:atroxgateway !requiretty

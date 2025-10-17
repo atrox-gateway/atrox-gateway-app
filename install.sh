@@ -83,6 +83,7 @@ deploy_code_and_install_npm() {
     
     # 1. Transferir propiedad de TODO el código a atroxgateway
     sudo chown -R "$MANAGER_USER":"$MANAGER_USER" "$REPO_PATH"
+    sudo chmod -R a+x "$REPO_PATH"/scripts/
     
     # 2. Instalar dependencias NPM
     cd "$REPO_PATH"

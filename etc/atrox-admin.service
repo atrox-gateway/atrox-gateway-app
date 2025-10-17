@@ -7,8 +7,8 @@ After=network-online.target
 
 [Service]
 # --- CONFIGURACION DE SEGURIDAD Y PRIVILEGIOS ---
-User=mgmt-service
-Group=mgmt-service
+User=atroxgateway 
+Group=atroxgateway
 ExecStart=/usr/bin/node /opt/atrox-gateway/packages/backend/atrox-admin-services/server.js
 Restart=always
 RestartSec=5s
