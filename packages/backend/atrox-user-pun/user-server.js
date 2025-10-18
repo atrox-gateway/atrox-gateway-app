@@ -30,6 +30,20 @@ if (fs.existsSync(socketPath)) {
     fs.unlinkSync(socketPath);
 }
 
+const touchSocketMiddleware = (req, res, next) => {
+    // Escucha el evento 'finish' que se dispara cuando la respuesta se ha enviado
+    res.on('finish', () => {
+        try {
+            const now = new Date();
+            fs.utimesSync(socketPath, now, now); 
+        } catch (err) {
+        }
+    });
+    next(); 
+};
+app.use(touchSocketMiddleware);
+
+
 const authenticateToken = (req, res, next) => {
     const token = req.cookies.access_token;
     if (!token) {

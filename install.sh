@@ -8,6 +8,8 @@ MANAGER_USER="atroxgateway"
 ADMIN_USER="mgmt-service"    
 PUN_RUN_DIR="/var/run/atrox-puns"
 NGINX_CONF_DIR="/etc/nginx"
+PUN_KILLER_SCRIPT_PATH="$REPO_PATH/scripts/pun_killer.sh"
+PUN_KILLER_LOG_PATH="/var/log/pun_killer.log"
 
 # --- FUNCIONES DE INSTALACIÓN ---
 
@@ -106,6 +108,21 @@ setup_services_start() {
     sudo systemctl start atrox-admin.service
 }
 
+setup_pun_killer_cron() {
+    echo "8. Configurando cron job para pun_killer.sh..."
+
+    if [ ! -f "$PUN_KILLER_SCRIPT_PATH" ]; then
+        echo "ERROR: El script $PUN_KILLER_SCRIPT_PATH no existe. Saltando configuración del cron." >&2
+        return 1 
+    fi
+    sudo chmod +x "$PUN_KILLER_SCRIPT_PATH"
+
+    CRON_JOB_CONTENT="*/15 * * * * root $PUN_KILLER_SCRIPT_PATH >> tee -a $PUN_KILLER_LOG_PATH 2>&1"
+    echo "$CRON_JOB_CONTENT" | sudo tee /etc/cron.d/atrox-pun-killer > /dev/null
+    sudo chmod 644 /etc/cron.d/atrox-pun-killer
+    echo "Cron job configurado para ejecutarse cada 15 minutos."
+}
+
 # --- EJECUCIÓN DEL FLUJO PRINCIPAL ---
 
 main() {
@@ -115,9 +132,10 @@ main() {
     deploy_configs_and_services
     deploy_code_and_install_npm
     setup_services_start
+    setup_pun_killer_cron
     
     echo "****************************************************************"
-    echo "✅ DESPLIEGUE FINAL DE ATROX GATEWAY COMPLETO."
+    echo "DESPLIEGUE FINAL DE ATROX GATEWAY COMPLETO."
     echo "****************************************************************"
 }
 
