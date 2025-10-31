@@ -7,7 +7,6 @@ import {
   Settings,
   Users,
   Home,
-  Zap
 } from "lucide-react";
 
 import {
@@ -22,6 +21,7 @@ import {
   SidebarHeader,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useAuth } from "@/contexts/AuthContext";
 
 const mainItems = [
   { title: "Inicio", url: "/", icon: Home },
@@ -41,6 +41,7 @@ export function AppSidebar() {
   const location = useLocation();
   const currentPath = location.pathname;
   const isCollapsed = state === "collapsed";
+  const { user } = useAuth();
 
   const isActive = (path: string) => currentPath === path;
   const getNavCls = ({ isActive }: { isActive: boolean }) =>
@@ -53,7 +54,7 @@ export function AppSidebar() {
       <SidebarHeader className="border-b border-border p-4">
         <div className={`flex items-center ${isCollapsed ? 'justify-center' : 'gap-3'}`}>
           <div className={`${isCollapsed ? 'p-2' : 'p-2'} bg-primary rounded-lg`}>
-            <Zap className={`${isCollapsed ? 'h-5 w-5' : 'h-6 w-6'} text-primary-foreground`} />
+            <img src="/placeholder.png" alt="Atrox Gateway Logo" className={`${isCollapsed ? 'h-5 w-5' : 'h-6 w-6'} text-primary-foreground`} />
           </div>
           {!isCollapsed && (
             <div>
@@ -87,23 +88,25 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
 
-        <SidebarGroup>
-          <SidebarGroupLabel>Administración</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {adminItems.map((item) => (
-                <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton asChild>
-                    <NavLink to={item.url} className={({ isActive }) => getNavCls({ isActive })}>
-                      <item.icon className={`${isCollapsed ? 'h-5 w-5' : 'h-5 w-5'}`} />
-                      {!isCollapsed && <span>{item.title}</span>}
-                    </NavLink>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {user?.role === 'admin' && (
+          <SidebarGroup>
+            <SidebarGroupLabel>Administración</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {adminItems.map((item) => (
+                  <SidebarMenuItem key={item.title}>
+                    <SidebarMenuButton asChild>
+                      <NavLink to={item.url} className={({ isActive }) => getNavCls({ isActive })}>
+                        <item.icon className={`${isCollapsed ? 'h-5 w-5' : 'h-5 w-5'}`} />
+                        {!isCollapsed && <span>{item.title}</span>}
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
       </SidebarContent>
     </Sidebar>
   );

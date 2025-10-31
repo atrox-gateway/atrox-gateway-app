@@ -21,6 +21,8 @@ export function TopBar() {
     <header className="h-16 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-6 flex items-center justify-between sticky top-0 z-50">
       <div className="flex items-center gap-4">
         <SidebarTrigger className="h-8 w-8" />
+  {/* Logo / icon placed in header - uses files from public/ (can be replaced) */}
+  <img src="/favicon-32x32.png" alt="Atrox logo" className="h-8 w-8 rounded" />
         <div className="relative hidden md:block">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input 

@@ -52,10 +52,10 @@ export default function Register() {
     try {
       await register(username, email, password);
       toast({
-        title: "Registro exitoso",
-        description: "Tu cuenta ha sido creada correctamente",
+        title: "Registro enviado",
+        description: "Tu solicitud fue recibida y está pendiente de aprobación por un administrador.",
       });
-      navigate('/dashboard');
+      navigate('/login');
     } catch (error: any) {
       toast({
         variant: "destructive",

@@ -19,8 +19,6 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// --- FUNCIÓN DE UTILIDAD ---
-// Función para generar un UUID v4 compatible con la mayoría de navegadores (soluciona el error crypto.randomUUID)
 const uuidv4 = () => {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         const r = Math.random() * 16 | 0;
@@ -29,7 +27,37 @@ const uuidv4 = () => {
     });
 };
 
-// --- EL PROVEEDOR ---
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function fetchWhoamiWithRetry(retries = 5, baseDelay = 500): Promise<any> {
+  let attempt = 0;
+  while (attempt <= retries) {
+    try {
+      const res = await fetch('/api/v1/user/whoami', { credentials: 'include' });
+      if (!res.ok) {
+        // Para errores de servidor 5xx intentamos de nuevo
+        if (res.status >= 500 && res.status < 600) {
+          throw new Error(`Server error ${res.status}`);
+        }
+        // Errores 4xx no son reintentos; devolveremos el error inmediatamente
+        const bodyText = await res.text().catch(() => '');
+        throw new Error(`Whoami failed ${res.status}: ${bodyText}`);
+      }
+      return await res.json();
+    } catch (err: any) {
+      attempt++;
+      if (attempt > retries) {
+        // Excedimos reintentos, volver a lanzar
+        throw err;
+      }
+      // Backoff exponencial con jitter (pequeño random)
+      const delay = Math.min(3000, baseDelay * Math.pow(2, attempt - 1));
+      const jitter = Math.floor(Math.random() * 200);
+      await sleep(delay + jitter);
+    }
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true); // Se inicia en true para bloquear la renderización
@@ -38,15 +66,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const checkSession = async () => {
       try {
-        // La llamada a /api/whoami verifica si el navegador tiene cookies válidas.
-        const response = await fetch('/api/whoami', { credentials: 'include' });
+        const response = await fetch('/api/v1/user/whoami', { credentials: 'include' });
         
         if (response.ok) {
           const userInfo = await response.json();
 
-          // El backend confirmó la identidad, establecemos el usuario en el estado
           const userObject: User = { 
-            id: uuidv4(), // Usar el UUID generado
+            id: uuidv4(), 
             username: userInfo.username, 
             email: userInfo.email || `${userInfo.username}@alumnos.udg.mx`,
             role: userInfo.role
@@ -54,30 +80,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUser(userObject);
         }
       } catch (error) {
-        // Cualquier error (401, 500, red) significa que no hay sesión válida.
         console.warn("Session check failed, proceeding without user:", error);
       } finally {
-        setIsLoading(false); // La verificación terminó, se puede renderizar la aplicación
+        setIsLoading(false); 
       }
     };
-
-    // --- CORRECCIÓN CRÍTICA ---
-    // Limpiamos la antigua lógica de localStorage que era insegura.
-    localStorage.removeItem('currentUser'); // Limpieza de cualquier estado de sesión inseguro.
-    // --- FIN CORRECCIÓN ---
     
     checkSession();
   }, []);
 
-  // Función de registro (Mantener la simulación de localStorage o reemplazar con API)
   const register = async (username: string, email: string, password: string): Promise<boolean> => {
-    throw new Error('La función de registro debe implementarse en el servidor.');
+    const response = await fetch('/api/v1/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, email, password })
+    });
+
+    if (!response.ok) {
+      let data = { message: 'Registration failed.' };
+      try { data = await response.json(); } catch (e) {}
+      throw new Error(data.message || `Registration failed (${response.status})`);
+    }
+
+    // 202 Accepted -> pending approval
+    const data = await response.json();
+    return true;
   };
 
-  // Función de login (Usa la API del Portero)
   const login = async (username: string, password: string): Promise<boolean> => {
-    // 1. Llamada a la API del Portero (Node.js)
-    const response = await fetch('/login', {
+    const response = await fetch('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
@@ -95,13 +126,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw new Error(errorData.message || `Error desconocido (${response.status})`);
     }
 
-    // 2. Obtener información de usuario verificada desde el PUN
-    const userInfoResponse = await fetch('/api/whoami', {
-      credentials: 'include'
-    });
-    const userInfo = await userInfoResponse.json();
+    const userInfo = await fetchWhoamiWithRetry(5, 500);
 
-    // 3. Crear el objeto de usuario y actualizar el estado
     const userObject: User = { 
         id: uuidv4(),
         username: userInfo.username, 
@@ -117,7 +143,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
       try {
           // Llama al backend para matar el proceso PUN y borrar las cookies HTTP-Only
-          await fetch('/logout', {
+      await fetch('/api/v1/auth/logout', {
               method: 'POST',
               credentials: 'include' 
           });

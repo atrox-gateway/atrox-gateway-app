@@ -1,8 +1,13 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogFooter, AlertDialogTitle, AlertDialogDescription, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import { toast } from "@/components/ui/use-toast";
+import { Textarea } from "@/components/ui/textarea";
 import { 
   Folder, 
   File, 
@@ -13,7 +18,9 @@ import {
   ArrowLeft,
   Grid,
   List,
-  Loader2
+  Loader2,
+  Edit3,
+  Trash
 } from "lucide-react";
 import { Layout } from "../components/Layout"; // Corregido: Uso de ruta relativa
 import { useAuth } from "../contexts/AuthContext"; // Corregido: Uso de ruta relativa
@@ -37,11 +44,68 @@ interface FileResponse {
 }
 
 const getFileTypeColor = (extension?: string) => {
-    switch (extension) {
+    const ext = extension?.toLowerCase();
+    switch (ext) {
+      // Scripting / interpreted
       case 'py': return 'bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400';
       case 'sh': return 'bg-green-500/10 text-green-600 dark:bg-green-500/20 dark:text-green-400';
+      case 'rb': return 'bg-pink-500/10 text-pink-600 dark:bg-pink-500/20 dark:text-pink-400';
+
+      // JavaScript / TypeScript
+      case 'js':
+      case 'mjs':
+      case 'cjs':
+      case 'jsx': return 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400';
+      case 'ts':
+      case 'tsx': return 'bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400';
+
+      // Data / config
+      case 'json': return 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400';
       case 'csv': return 'bg-orange-500/10 text-orange-600 dark:bg-orange-500/20 dark:text-orange-400';
-      default: return 'bg-muted text-muted-foreground';
+      case 'yml':
+      case 'yaml': return 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400';
+
+      // Markup / text
+      case 'md': return 'bg-slate-500/10 text-slate-700 dark:bg-slate-500/20 dark:text-slate-200';
+      case 'txt': return 'bg-muted/10 text-muted-foreground dark:bg-muted/20 dark:text-muted-foreground';
+      case 'html': return 'bg-rose-500/10 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400';
+      case 'css': return 'bg-cyan-500/10 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400';
+
+      // Images
+      case 'png':
+      case 'jpg':
+      case 'jpeg':
+      case 'gif':
+      case 'svg': return 'bg-pink-500/10 text-pink-600 dark:bg-pink-500/20 dark:text-pink-400';
+
+      // Documents
+      case 'pdf': return 'bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-400';
+      case 'doc':
+      case 'docx': return 'bg-violet-500/10 text-violet-600 dark:bg-violet-500/20 dark:text-violet-400';
+
+      // Archives / binaries
+      case 'zip':
+      case 'gz':
+      case 'tgz':
+      case 'tar':
+      case 'rar': return 'bg-gray-500/10 text-gray-600 dark:bg-gray-500/20 dark:text-gray-400';
+
+      // Common compiled / language files
+      case 'java': return 'bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-400';
+      case 'go': return 'bg-teal-500/10 text-teal-600 dark:bg-teal-500/20 dark:text-teal-400';
+      case 'rs': return 'bg-yellow-600/10 text-yellow-700 dark:bg-yellow-600/20 dark:text-yellow-300';
+      case 'c':
+      case 'cpp':
+      case 'h':
+      case 'hpp': return 'bg-sky-500/10 text-sky-600 dark:bg-sky-500/20 dark:text-sky-400';
+
+      // Notebooks / scientific
+      case 'ipynb': return 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400';
+      case 'r':
+      case 'rmd': return 'bg-rose-500/10 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400';
+
+      // Fallback: respects theme tokens
+      default: return 'bg-muted/10 text-muted-foreground dark:bg-muted/20 dark:text-muted-foreground';
     }
 };
 
@@ -65,11 +129,29 @@ const Files = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Dialog / modal state
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [createName, setCreateName] = useState('');
+  const [createContent, setCreateContent] = useState('');
+
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editFilePath, setEditFilePath] = useState('');
+  const [editFileName, setEditFileName] = useState('');
+  const [editContent, setEditContent] = useState('');
+
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteTargetFilePath, setDeleteTargetFilePath] = useState('');
+  const [deleteTargetFileName, setDeleteTargetFileName] = useState('');
 
   const fetchFiles = useCallback(async (path: string) => {
     if (!isAuthenticated || !user) return;
     
     let validatedPath = path;
+
+    if (path === "/"){
+      validatedPath = "/hpc_home/";
+    }
 
     // Lógica de restricción de Frontend
     if (!isAdmin && !path.startsWith(USER_HOME_PATH)) {
@@ -79,7 +161,7 @@ const Files = () => {
     setIsLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/files?path=${encodeURIComponent(validatedPath)}`);
+  const response = await fetch(`/api/v1/user/files?path=${encodeURIComponent(validatedPath)}`);
       
       if (!response.ok) {
         const errorText = await response.text();
@@ -120,8 +202,220 @@ const Files = () => {
     if (type === 'folder') {
         let newPath = currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`;
         fetchFiles(newPath);
+    } else {
+        // Open file for viewing/editing
+        const filePath = currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`;
+        openFileForEdit(filePath, name);
     }
   };
+
+  const base64ToUtf8 = (b64: string) => {
+    try {
+      return decodeURIComponent(escape(atob(b64)));
+    } catch (e) {
+      // Fallback: return raw atob
+      return atob(b64);
+    }
+  }
+
+  const utf8ToBase64 = (str: string) => {
+    try {
+      return btoa(unescape(encodeURIComponent(str)));
+    } catch (e) {
+      return btoa(str);
+    }
+  }
+
+  const openFileForEdit = async (filePath: string, displayName: string) => {
+    setIsLoading(true);
+    try {
+      const resp = await fetch(`/api/v1/user/file?path=${encodeURIComponent(filePath)}`);
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(txt || `Error: ${resp.status}`);
+      }
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message || 'Failed to read file');
+      if (data.isBinary) {
+        // trigger download for binary
+        const blob = b64toBlob(data.contentBase64);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = displayName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast({ title: 'Descarga iniciada', description: `${displayName} se está descargando.` });
+      } else {
+        const text = base64ToUtf8(data.contentBase64);
+        setEditFilePath(filePath);
+        setEditFileName(displayName);
+        setEditContent(text);
+        setEditDialogOpen(true);
+      }
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message || 'Error leyendo archivo' });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  const downloadFile = async (filePath: string, displayName: string) => {
+    setIsLoading(true);
+    try {
+      const resp = await fetch(`/api/v1/user/file?path=${encodeURIComponent(filePath)}`);
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(txt || `Error: ${resp.status}`);
+      }
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message || 'Failed to read file');
+      const blob = b64toBlob(data.contentBase64);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = displayName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message || 'Error descargando archivo' });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  const b64toBlob = (b64Data: string, contentType = 'application/octet-stream', sliceSize = 512) => {
+    const byteCharacters = atob(b64Data);
+    const byteArrays = [];
+    for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
+      const slice = byteCharacters.slice(offset, offset + sliceSize);
+      const byteNumbers = new Array(slice.length);
+      for (let i = 0; i < slice.length; i++) {
+        byteNumbers[i] = slice.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      byteArrays.push(byteArray);
+    }
+    return new Blob(byteArrays, { type: contentType });
+  }
+
+  const handleDelete = async (name: string) => {
+    const filePath = currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`;
+    setDeleteTargetFileName(name);
+    setDeleteTargetFilePath(filePath);
+    setDeleteDialogOpen(true);
+  }
+
+  const confirmDelete = async () => {
+    setIsLoading(true);
+    try {
+      const resp = await fetch(`/api/v1/user/file?path=${encodeURIComponent(deleteTargetFilePath)}`, { method: 'DELETE' });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(txt || `Error: ${resp.status}`);
+      }
+      toast({ title: 'Eliminado', description: `${deleteTargetFileName} eliminado.` });
+      setDeleteDialogOpen(false);
+      fetchFiles(currentPath);
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message || 'Error eliminando archivo' });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  const handleCreateFile = () => {
+    setCreateName('');
+    setCreateContent('');
+    setCreateDialogOpen(true);
+  }
+
+  const confirmCreate = async () => {
+    if (!createName) return toast({ title: 'Nombre requerido', description: 'Introduce un nombre para el archivo.' });
+    const filePath = currentPath.endsWith('/') ? `${currentPath}${createName}` : `${currentPath}/${createName}`;
+    setIsLoading(true);
+    try {
+      const body = { path: filePath, contentBase64: utf8ToBase64(createContent || '') };
+      const resp = await fetch('/api/v1/user/file', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(txt || `Error: ${resp.status}`);
+      }
+      toast({ title: 'Creado', description: `${createName} creado.` });
+      setCreateDialogOpen(false);
+      fetchFiles(currentPath);
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message || 'Error creando archivo' });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  const handleUploadClick = () => {
+    if (fileInputRef.current) fileInputRef.current.click();
+  }
+
+  const handleFileInput = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const list = e.target.files;
+    if (!list || list.length === 0) return;
+    const toSend: Array<{ name: string; contentBase64: string }> = [];
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      // Read as data URL to easily get base64
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = reject;
+        reader.readAsDataURL(f);
+      });
+      const parts = dataUrl.split(',');
+      const b64 = parts[1];
+      toSend.push({ name: f.name, contentBase64: b64 });
+    }
+    setIsLoading(true);
+    try {
+      const resp = await fetch('/api/v1/user/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: currentPath, files: toSend }) });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(txt || `Error: ${resp.status}`);
+      }
+      const data = await resp.json();
+      if (data.success) {
+        toast({ title: 'Subida completada', description: 'Archivos subidos correctamente.' });
+        fetchFiles(currentPath);
+      } else {
+        throw new Error(data.message || 'Upload failed');
+      }
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message || 'Error subiendo archivos' });
+    } finally {
+      setIsLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  const saveEdit = async () => {
+    setIsLoading(true);
+    try {
+      const body = { path: editFilePath, contentBase64: utf8ToBase64(editContent || '') };
+      const resp = await fetch('/api/v1/user/file', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(txt || `Error: ${resp.status}`);
+      }
+      toast({ title: 'Guardado', description: `${editFileName} actualizado.` });
+      setEditDialogOpen(false);
+      fetchFiles(currentPath);
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message || 'Error guardando archivo' });
+    } finally {
+      setIsLoading(false);
+    }
+  }
   
   const handleGoBack = () => {
     const segments = currentPath.split('/').filter(s => s.length > 0);
@@ -141,9 +435,20 @@ const Files = () => {
     fetchFiles(parentPath);
   }
 
-  const filteredFiles = files.filter(item => 
-      item.name.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredFiles = files
+    .filter(item => item.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    .sort((a, b) => {
+      // Desired order: hidden files (name starts with '.' and is a file) -> folders -> regular files
+      const aHiddenFile = a.name.startsWith('.') && a.type === 'file' ? 0 : 1;
+      const bHiddenFile = b.name.startsWith('.') && b.type === 'file' ? 0 : 1;
+      if (aHiddenFile !== bHiddenFile) return aHiddenFile - bHiddenFile;
+      // folders next
+      const aIsFolder = a.type === 'folder' ? 0 : 1;
+      const bIsFolder = b.type === 'folder' ? 0 : 1;
+      if (aIsFolder !== bIsFolder) return aIsFolder - bIsFolder;
+      // finally by name (case-insensitive)
+      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+    });
 
   return (
     <Layout>
@@ -155,13 +460,17 @@ const Files = () => {
               Administra scripts, datasets y resultados
             </p>
           </div>
-          <Button className="btn-hero">
-            <Upload className="w-4 h-4 mr-2" />
-            Subir Archivos
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button className="btn-hero" onClick={handleCreateFile}>
+              Nuevo archivo
+            </Button>
+            <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={handleFileInput} />
+            <Button className="btn-hero" onClick={handleUploadClick}>
+              <Upload className="w-4 h-4 mr-2" />
+              Subir Archivos
+            </Button>
+          </div>
         </div>
-
-        ---
         
         <Card className="card-professional animate-fade-in-up delay-100">
           <CardContent className="p-4">
@@ -176,7 +485,7 @@ const Files = () => {
                   <ArrowLeft className="h-4 w-4" />
                 </Button>
                 <span className="text-sm text-muted-foreground">Ruta:</span>
-                <span className="font-mono text-sm bg-muted px-2 py-1 rounded truncate max-w-xs md:max-w-md">
+                <span className="font-mono text-sm bg-muted/10 text-muted-foreground dark:bg-muted/20 dark:text-muted-foreground px-2 py-1 rounded truncate max-w-xs md:max-w-md">
                   {currentPath}
                 </span>
               </div>
@@ -201,8 +510,54 @@ const Files = () => {
             </div>
           </CardContent>
         </Card>
+        {/* Create file dialog */}
+        <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Crear nuevo archivo</DialogTitle>
+              <DialogDescription>Introduce el nombre (relativo a la ruta actual) y el contenido.</DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2">
+              <Input placeholder="nombre.txt" value={createName} onChange={(e) => setCreateName(e.target.value)} />
+              <Textarea value={createContent} onChange={(e) => setCreateContent(e.target.value)} rows={10} />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>Cancelar</Button>
+              <Button onClick={confirmCreate}>Crear</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
-        ---
+        {/* Edit file dialog */}
+        <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Editar {editFileName}</DialogTitle>
+              <DialogDescription>Edita el contenido y guarda los cambios.</DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2">
+              <Textarea value={editContent} onChange={(e) => setEditContent(e.target.value)} rows={16} />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setEditDialogOpen(false)}>Cancelar</Button>
+              <Button onClick={saveEdit}>Guardar</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Delete confirmation (AlertDialog) */}
+        <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Eliminar archivo</AlertDialogTitle>
+              <AlertDialogDescription>¿Estás seguro que quieres eliminar {deleteTargetFileName}? Esta acción no se puede deshacer.</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel onClick={() => setDeleteDialogOpen(false)}>Cancelar</AlertDialogCancel>
+              <AlertDialogAction onClick={confirmDelete}>Eliminar</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         <Card className="card-professional animate-fade-in-up delay-200">
           <CardHeader>
@@ -255,19 +610,89 @@ const Files = () => {
                     <span className="text-sm text-muted-foreground hidden md:inline">{item.size}</span>
                     <span className="text-sm text-muted-foreground hidden md:inline">{item.modified}</span>
 
-                    <Button variant="ghost" size="icon" className="ml-auto">
-                        <MoreHorizontal className="h-4 w-4" />
-                    </Button>
+                    {/* Action menu (compact) */}
+                    {(() => {
+                      const filePath = currentPath.endsWith('/') ? `${currentPath}${item.name}` : `${currentPath}/${item.name}`;
+                      return (
+                        <div className="ml-auto">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon" onClick={(e) => e.stopPropagation()}>
+                                <MoreHorizontal className="h-4 w-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent>
+                              {item.type === 'file' && (
+                                <DropdownMenuItem onSelect={(e) => { e.preventDefault(); openFileForEdit(filePath, item.name); }}>Editar</DropdownMenuItem>
+                              )}
+                              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); downloadFile(filePath, item.name); }}>Descargar</DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setDeleteTargetFileName(item.name); setDeleteTargetFilePath(filePath); setDeleteDialogOpen(true); }}>Eliminar</DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      );
+                    })()}
                   </div>
                 ))}
               </div>
             )}
             
-            {!isLoading && filteredFiles.length > 0 && viewMode === 'grid' && (
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                    <p className="text-muted-foreground col-span-full">Modo Grid pendiente de implementación.</p>
+      {!isLoading && filteredFiles.length > 0 && viewMode === 'grid' && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+          {filteredFiles.map((item) => {
+            const filePath = currentPath.endsWith('/') ? `${currentPath}${item.name}` : `${currentPath}/${item.name}`;
+            return (
+              <div
+                key={item.id}
+                onClick={() => handleNavigation(item.name, item.type)}
+                className="relative p-4 border border-border rounded-lg hover:shadow-md hover:bg-accent/50 transition-colors cursor-pointer"
+              >
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center space-x-3 min-w-0">
+                    {getFileIcon(item.type, item.extension)}
+                    <div className="flex flex-col min-w-0">
+                      <span className="font-medium truncate max-w-[12rem]">{item.name}</span>
+                      <span className="text-xs text-muted-foreground hidden sm:block truncate max-w-[12rem]">{item.owner} • {item.size}</span>
+                    </div>
+                  </div>
+
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon">
+                          <MoreHorizontal className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent>
+                        {item.type === 'file' && (
+                          <DropdownMenuItem onSelect={(e) => { e.preventDefault(); openFileForEdit(filePath, item.name); }}>Editar</DropdownMenuItem>
+                        )}
+                        <DropdownMenuItem onSelect={(e) => { e.preventDefault(); downloadFile(filePath, item.name); }}>Descargar</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setDeleteTargetFileName(item.name); setDeleteTargetFilePath(filePath); setDeleteDialogOpen(true); }}>Eliminar</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
                 </div>
-            )}
+
+                <div className="mt-3 flex items-center justify-between">
+                  <div>
+                    {item.type === 'folder' ? (
+                      <Badge className="text-xs">Carpeta</Badge>
+                    ) : (
+                      item.extension && (
+                        <Badge className={`text-xs ${getFileTypeColor(item.extension)}`}>.{item.extension}</Badge>
+                      )
+                    )}
+                  </div>
+                  <span className="text-xs text-muted-foreground">{item.modified}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
           </CardContent>
         </Card>
       </div>

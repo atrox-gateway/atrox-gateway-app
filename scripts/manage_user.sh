@@ -50,27 +50,48 @@ case "$ACTION" in
 
         echo "Creando usuario '$USERNAME' con UID '$NEXT_UID'..."
         # Crear en app
-        sudo useradd -m -s /bin/bash -u $NEXT_UID $USERNAME && echo "$USERNAME:$PASSWORD" | sudo chpasswd
+        sudo useradd -N -m -s /bin/bash -u $NEXT_UID $USERNAME && echo "$USERNAME:$PASSWORD" | sudo chpasswd
         sudo usermod -aG www-data $USERNAME # Importante para permisos del socket
         echo "-> Usuario creado en 'app'."
         # Crear en hpc-master
-        remote_exec "sudo useradd -m -s /bin/bash -u $NEXT_UID $USERNAME && echo '$USERNAME:$PASSWORD' | sudo chpasswd"
+        remote_exec "sudo useradd -N -m -s /bin/bash -u $NEXT_UID $USERNAME && echo '$USERNAME:$PASSWORD' | sudo chpasswd"
         echo "-> Usuario creado en '$HPC_HOST'."
-        # Añadir a Slurm
-        remote_exec "sudo sacctmgr -i add user $USERNAME Account=$ACCOUNT"
-        echo "-> Usuario añadido a la cuenta Slurm '$ACCOUNT'."
+        # Añadir asociación en Slurm y establecer DefaultAccount
+        remote_exec "sudo sacctmgr -i add user name=$USERNAME account=$ACCOUNT || true"
+        remote_exec "sudo sacctmgr -i modify user where name=$USERNAME set DefaultAccount=$ACCOUNT"
+        echo "-> Usuario añadido y DefaultAccount establecido en Slurm a '$ACCOUNT'."
+        # Si la cuenta es 'admin', también establecer AdminLevel=Administrator para consistencia
+        if [[ "${ACCOUNT,,}" == "admin" ]]; then
+            remote_exec "sudo sacctmgr -i modify user where name=$USERNAME set AdminLevel=Administrator"
+            echo "-> Nivel de Admin Slurm establecido a 'Administrator' porque la cuenta es 'admin'."
+        fi
         echo "✅ Usuario '$USERNAME' creado exitosamente."
         ;;
 
     show)
         if [ -z "$USERNAME" ]; then echo "Uso: $0 show <usuario>" >&2; exit 1; fi
-        echo "Detalles del usuario '$USERNAME':"
-        echo "--- Usuario Linux (app) ---"
-        getent passwd $USERNAME || echo "Usuario '$USERNAME' no encontrado localmente."
-        echo "--- Usuario Linux (hpc-master) ---"
-        remote_exec "getent passwd $USERNAME" || echo "Usuario '$USERNAME' no encontrado remotamente."
-        echo "--- Información de Cuenta Slurm ---"
-        remote_exec "sudo sacctmgr show user where name=$USERNAME withassoc format=User,Account,AdminLevel"
+        
+        # Comprobar si el usuario existe para evitar errores
+        if ! getent passwd "$USERNAME" > /dev/null; then
+            echo "Error: Usuario '$USERNAME' no encontrado." >&2
+            exit 2 # Código de error para "Usuario no encontrado"
+        fi
+
+        # Obtener información de Slurm en formato parseable
+        slurm_info=$(remote_exec "sudo sacctmgr show user where name=$USERNAME format=User,DefaultAccount,AdminLevel --parsable2 --noheader")
+        
+        # Si no hay info de Slurm, puede que el usuario exista en Linux pero no en Slurm
+        if [ -z "$slurm_info" ]; then
+            echo "user|$USERNAME"
+            echo "defaultAccount|N/A"
+            echo "adminLevel|None"
+        else
+            # Parsear la salida y devolverla en formato clave|valor
+            IFS='|' read -r user default_account admin_level <<< "$slurm_info"
+            echo "user|$user"
+            echo "defaultAccount|$default_account"
+            echo "adminLevel|$admin_level"
+        fi
         ;;
 
     list)
@@ -98,13 +119,31 @@ case "$ACTION" in
                 ;;
             account)
                 echo "Cambiando cuenta Slurm para '$USERNAME' a '$VALUE'..."
+                # Asegurarnos de que la asociación usuario->cuenta exista en Slurm
+                remote_exec "sudo sacctmgr -i add user name=$USERNAME account=$VALUE || true"
                 remote_exec "sudo sacctmgr -i modify user where name=$USERNAME set DefaultAccount=$VALUE"
                 echo "✅ Cuenta Slurm actualizada."
+                # Si la cuenta es 'admin', también establecer AdminLevel=Administrator para consistencia
+                if [[ "${VALUE,,}" == "admin" ]]; then
+                    remote_exec "sudo sacctmgr -i modify user where name=$USERNAME set AdminLevel=Administrator"
+                    echo "✅ Nivel de Admin Slurm actualizado a 'Administrator' porque la cuenta es 'admin'."
+                else
+                    # Si cambiamos a una cuenta distinta de 'admin', revocamos posibles privilegios de admin
+                    remote_exec "sudo sacctmgr -i modify user where name=$USERNAME set AdminLevel=None" || true
+                    echo "-> Si existía AdminLevel, ha sido revocado (None) porque la cuenta no es 'admin'."
+                fi
                 ;;
             adminlevel)
                 echo "Cambiando nivel de admin Slurm para '$USERNAME' a '$VALUE'..."
+                # Ajustar AdminLevel primero
                 remote_exec "sudo sacctmgr -i modify user where name=$USERNAME set AdminLevel=$VALUE"
                 echo "✅ Nivel de Admin Slurm actualizado."
+                # Si se otorga privilegio de administrador, asegurarse de que exista la asociación y DefaultAccount sea 'admin'
+                if [[ "${VALUE,,}" == "administrator" ]]; then
+                    remote_exec "sudo sacctmgr -i add user name=$USERNAME account=admin || true"
+                    remote_exec "sudo sacctmgr -i modify user where name=$USERNAME set DefaultAccount=admin"
+                    echo "-> DefaultAccount establecido a 'admin' debido a AdminLevel 'Administrator'."
+                fi
                 ;;
             *)
                 echo "Error: Atributo '$ATTRIBUTE' no reconocido." >&2
