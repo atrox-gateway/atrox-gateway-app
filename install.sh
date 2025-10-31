@@ -90,6 +90,8 @@ deploy_code_and_install_npm() {
     # 2. Instalar dependencias NPM
     cd "$REPO_PATH"
     sudo -E npm install 
+    cd "$REPO_PATH"/packages/frontend
+    sudo npm install && sudo npm run build
     
     # 3. Asignar propiedad de node_modules al MANAGER_USER
     sudo chown -R "$MANAGER_USER":"$MANAGER_USER" "$REPO_PATH"/node_modules

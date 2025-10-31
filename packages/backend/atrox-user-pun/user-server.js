@@ -66,41 +66,65 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
+function parseLsOutput(output, currentPath) {
+    // Quita la primera línea ('total X')
+    const lines = output.trim().split('\n').slice(1); 
+    
+    return lines.map(line => {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 8) return null; // Saltar líneas no válidas
+
+        const permissions = parts[0];
+        const numLinks = parts[1];
+        const owner = parts[2];
+        const group = parts[3];
+        const size = parts[4];
+        const month = parts[5];
+        const day = parts[6];
+        const timeOrYear = parts[7];
+        const name = parts.slice(8).join(' '); // El nombre puede contener espacios
+
+        const isDirectory = permissions.startsWith('d');
+        const extensionMatch = name.match(/\.([0-9a-z]+)(?:[?#]|$)/i);
+        const extension = isDirectory ? undefined : (extensionMatch ? extensionMatch[1] : undefined);
+
+        return {
+            id: `${currentPath}/${name}`, // Usar la ruta completa como ID
+            name: name,
+            type: isDirectory ? 'folder' : 'file',
+            size: isDirectory ? '-' : size,
+            modified: `${month} ${day} ${timeOrYear}`,
+            owner: owner,
+            group: group,
+            permissions: permissions,
+            extension: extension
+        };
+    }).filter(item => item !== null && item.name !== '.' && item.name !== '..'); // Excluir . y ..
+}
+
 app.use('/api', authenticateToken);
 
 app.get('/api/whoami', (req, res) => {
-    const userInfo = os.userInfo();
-    res.json({ username: userInfo.username, uid: userInfo.uid });
+    res.json({ 
+        username: req.user.sub, 
+        role: req.user.role
+    });
 });
 
-app.get('/api/files', (req, res) => {
-    console.log(`[PUN /api/files] Solicitud recibida. Query path: ${req.query.path}`); // Nuevo log
-    const { username } = os.userInfo();
+app.get('/api/files', authenticateToken, (req, res) => {
+    const username = req.user.sub; 
     const basePath = `/hpc_home/${username}`;
-    const targetPath = path.resolve(basePath, req.query.path || '');
-
-    console.log(`[PUN /api/files] Base path: ${basePath}, Target path: ${targetPath}`); // Nuevo log
-
-    if (!targetPath.startsWith(basePath)) {
-        console.error(`[PUN /api/files] Acceso denegado: ${targetPath} fuera de ${basePath}`); // Nuevo log
-        return res.status(403).type('text/plain').send('Access denied: Path is outside of the user\'s home directory.');
-    }
+    const finalPath = req.query.path || basePath;
     
-    fs.readdir(targetPath, { withFileTypes: true }, (err, files) => {
+    exec(`ls -l ${finalPath}`, (err, stdout, stderr) => {
         if (err) {
-            console.error(`[PUN /api/files] Error al leer directorio ${targetPath}:`, err); // Nuevo log
-            if (err.code === 'ENOENT') {
-                return res.status(404).type('text/plain').send('Directory not found.');
-            }
-            return res.status(500).type('text/plain').send('Error listing files.');
+            console.error(`[PUN /api/files] Error:`, stderr);
+            return res.status(400).json({ success: false, message: stderr });
         }
         
-        const fileList = files.map(file => {
-            return `${file.isDirectory() ? 'd' : '-'} ${file.name}`;
-        }).join('\n');
-
-        console.log(`[PUN /api/files] Archivos listados exitosamente en ${targetPath}`); // Nuevo log
-        res.type('text/plain').send(fileList);
+        const fileList = parseLsOutput(stdout, finalPath); 
+        
+        return res.json({ success: true, path: finalPath, files: fileList });
     });
 });
 
