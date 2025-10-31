@@ -295,12 +295,12 @@ All colors MUST be HSL.
 }
 
 @keyframes dataFadeIn {
-  from { opacity: 0; transform: translateY(5px); }
+  from { opacity: 0; transform: translateY(2px); will-change: opacity, transform; } /* Reduced translateY and added will-change */
   to { opacity: 1; transform: translateY(0); }
 }
 
 /* Staggered animation delays */
-.delay-100 { animation-delay: 0.1s; }
+.delay-100 { animation-delay: 0.05s; } /* Reduced from 0.1s */
 .delay-200 { animation-delay: 0.2s; }
 .delay-300 { animation-delay: 0.3s; }
 .delay-400 { animation-delay: 0.4s; }

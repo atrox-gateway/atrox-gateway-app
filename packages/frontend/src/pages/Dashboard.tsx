@@ -20,16 +20,16 @@ import { Layout } from "@/components/Layout";
 import { useAuth } from "@/contexts/AuthContext";
 import { AdminPanel } from "@/components/AdminPanel";
 
-// Mock data - en producción vendría del backend
-const mockStats = {
-  totalJobs: 247,
-  runningJobs: 12,
-  queuedJobs: 8,
-  completedToday: 15,
-  cpuUsage: 78,
-  memoryUsage: 65,
-  activeUsers: 23
-};
+// Eliminado: Mock data - en producción vendría del backend
+// const mockStats = {
+//   totalJobs: 247,
+//   runningJobs: 12,
+//   queuedJobs: 8,
+//   completedToday: 15,
+//   cpuUsage: 78,
+//   memoryUsage: 65,
+//   activeUsers: 23
+// };
 
 const mockRecentJobs = [
   { id: "job_001", name: "Análisis RNA-Seq", status: "running", progress: 75, user: "Dr. García", time: "2h 15m" },
@@ -150,7 +150,7 @@ const Dashboard = () => {
           <div className="flex items-center gap-2">
             <Button onClick={fetchDashboardData} disabled={isLoading} variant="outline">
               {isLoading ? (
-                <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" />Actualizando...</span>
+                <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /></span>
               ) : (
                 'Actualizar'
               )}
@@ -159,11 +159,7 @@ const Dashboard = () => {
         </div>
 
         {/* Loading / Error */}
-        {isLoading && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-            <Loader2 className="h-12 w-12 animate-spin text-primary" />
-          </div>
-        )}
+        {/* Eliminado: isLoading overlay */}
 
         {error && (
           <div className="text-red-500 font-medium p-4 border border-red-500 bg-red-500/10 rounded-lg">🚨 Error: {error}</div>
@@ -177,7 +173,7 @@ const Dashboard = () => {
               <Activity className="h-4 w-4 text-primary" />
             </CardHeader>
             <CardContent>
-              <div key={dataVersion} className="text-2xl font-bold animate-data-fade-in">{dashboardStats ? dashboardStats.totalJobs : mockStats.totalJobs}</div>
+              <div key={dataVersion} className="text-2xl font-bold animate-data-fade-in">{dashboardStats ? dashboardStats.totalJobs : '—'}</div>
               <p className="text-xs text-muted-foreground">
                 +12% desde el mes pasado
               </p>
@@ -190,9 +186,9 @@ const Dashboard = () => {
               <TrendingUp className="h-4 w-4 text-success" />
             </CardHeader>
             <CardContent>
-                  <div key={dataVersion + 1} className="text-2xl font-bold text-success animate-data-fade-in">{dashboardStats ? dashboardStats.runningJobs : mockStats.runningJobs}</div>
+                  <div key={dataVersion + 1} className="text-2xl font-bold text-success animate-data-fade-in">{dashboardStats ? dashboardStats.runningJobs : '—'}</div>
                   <p className="text-xs text-muted-foreground">
-                    {dashboardStats ? dashboardStats.queuedJobs : mockStats.queuedJobs} en cola
+                    {dashboardStats ? dashboardStats.queuedJobs : '—'} en cola
                   </p>
             </CardContent>
           </Card>
@@ -203,7 +199,7 @@ const Dashboard = () => {
               <Users className="h-4 w-4 text-primary" />
             </CardHeader>
             <CardContent>
-                  <div key={dataVersion + 2} className="text-2xl font-bold animate-data-fade-in">{dashboardStats ? dashboardStats.activeUsers : mockStats.activeUsers}</div>
+                  <div key={dataVersion + 2} className="text-2xl font-bold animate-data-fade-in">{dashboardStats ? dashboardStats.activeUsers : '—'}</div>
               <p className="text-xs text-muted-foreground">
                 En las últimas 24h
               </p>
@@ -216,7 +212,7 @@ const Dashboard = () => {
               <CheckCircle className="h-4 w-4 text-success" />
             </CardHeader>
             <CardContent>
-                  <div key={dataVersion + 3} className="text-2xl font-bold animate-data-fade-in">{dashboardStats ? dashboardStats.completedToday : mockStats.completedToday}</div>
+                  <div key={dataVersion + 3} className="text-2xl font-bold animate-data-fade-in">{dashboardStats ? dashboardStats.completedToday : '—'}</div>
               <p className="text-xs text-muted-foreground">
                 Tasa de éxito: 94%
               </p>
@@ -240,16 +236,16 @@ const Dashboard = () => {
               <div>
                 <div className="flex justify-between text-sm mb-2">
                   <span>CPU</span>
-                  <span key={dataVersion + 4} className="animate-data-fade-in">{dashboardStats ? `${dashboardStats.cpuUsage}%` : `${mockStats.cpuUsage}%`}</span>
+                  <span key={dataVersion + 4} className="animate-data-fade-in">{dashboardStats ? `${dashboardStats.cpuUsage}%` : '—'}</span>
                 </div>
-                <Progress value={dashboardStats ? dashboardStats.cpuUsage : mockStats.cpuUsage} className="h-2" />
+                <Progress value={dashboardStats ? dashboardStats.cpuUsage : 0} className="h-2" />
               </div>
               <div>
                 <div className="flex justify-between text-sm mb-2">
                   <span>Memoria RAM</span>
-                  <span key={dataVersion + 5} className="animate-data-fade-in">{dashboardStats ? `${dashboardStats.memoryUsage}%` : `${mockStats.memoryUsage}%`}</span>
+                  <span key={dataVersion + 5} className="animate-data-fade-in">{dashboardStats ? `${dashboardStats.memoryUsage}%` : '—'}</span>
                 </div>
-                <Progress value={dashboardStats ? dashboardStats.memoryUsage : mockStats.memoryUsage} className="h-2" />
+                <Progress value={dashboardStats ? dashboardStats.memoryUsage : 0} className="h-2" />
               </div>
               <div>
                 <div className="flex justify-between text-sm mb-2">
