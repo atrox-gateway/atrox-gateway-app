@@ -120,7 +120,7 @@ const Files = () => {
   const { isAuthenticated, user } = useAuth();
   
   const username = user?.username || 'unknown';
-  const USER_HOME_PATH = `/hpc_home/${username}`;
+  const USER_HOME_PATH = `/hpc-home/${username}`;
   const isAdmin = user?.role === 'admin';
 
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
@@ -150,7 +150,7 @@ const Files = () => {
     let validatedPath = path;
 
     if (path === "/"){
-      validatedPath = "/hpc_home/";
+      validatedPath = "/hpc-home/";
     }
 
     // Lógica de restricción de Frontend
@@ -422,8 +422,7 @@ const Files = () => {
     segments.pop();
     let parentPath = `/${segments.join('/')}`;
     
-    // Si la ruta resultante está vacía o es solo /hpc_home, forzar al home del usuario
-    if (parentPath === '' || (parentPath === '/hpc_home' && !isAdmin)) {
+    if (parentPath === '' || (parentPath === '/hpc-home' && !isAdmin)) {
          parentPath = USER_HOME_PATH;
     }
 

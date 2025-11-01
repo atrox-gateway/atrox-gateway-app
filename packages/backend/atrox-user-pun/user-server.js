@@ -170,7 +170,7 @@ userRouter.get('/whoami', (req, res) => {
 
 userRouter.get('/files', (req, res) => {
     const username = req.user.sub; 
-    const basePath = `/hpc_home/${username}`;
+    const basePath = `/hpc-home/${username}`;
     const finalPath = req.query.path || basePath;
     
     exec(`ls -l ${finalPath}`, (err, stdout, stderr) => {
@@ -218,7 +218,7 @@ userRouter.get('/dashboard/stats', async (req, res) => {
 const filesRouter = express.Router();
 
 // Configuración de root y límites
-const USER_ROOT_PREFIX = '/hpc_home';
+const USER_ROOT_PREFIX = '/hpc-home';
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024; // 200 MB
 
 function normalizeAndVerifyPath(requestingUser, requestedPath, isAdmin) {
@@ -227,17 +227,15 @@ function normalizeAndVerifyPath(requestingUser, requestedPath, isAdmin) {
     // Resolve to absolute and normalize
     target = path.resolve(target);
 
-    // If not admin, enforce prefix /hpc_home/<user>
     if (!isAdmin) {
         const userRoot = path.resolve(path.join(USER_ROOT_PREFIX, requestingUser));
         if (!target.startsWith(userRoot + path.sep) && target !== userRoot) {
             throw new Error('Access denied to the requested path.');
         }
     } else {
-        // Admins are allowed only under /hpc_home for safety in this service
         const globalRoot = path.resolve(USER_ROOT_PREFIX);
         if (!target.startsWith(globalRoot + path.sep) && target !== globalRoot) {
-            throw new Error('Admin access limited to /hpc_home.');
+            throw new Error('Admin access limited to /hpc-home.');
         }
     }
     return target;
