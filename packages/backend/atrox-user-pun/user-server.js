@@ -218,14 +218,15 @@ userRouter.get('/dashboard/stats', async (req, res) => {
     async function getUserJobHistory(username, days = 30) {
         try {
             const since = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
-            // Fields: JobID, JobName, State, Submit, Start, End, Elapsed, AllocCPUS, ReqMem, ExitCode
-            const fields = 'JobID,JobName,State,Submit,Start,End,Elapsed,AllocCPUS,ReqMem,ExitCode';
+            // Fields: JobID, JobName, State, Submit, Start, End, Elapsed, AllocCPUS, ReqMem, ExitCode, User
+            // Include 'User' so the PUN returns the user field even for per-user queries.
+            const fields = 'JobID,JobName,State,Submit,Start,End,Elapsed,AllocCPUS,ReqMem,ExitCode,User';
             const cmd = `sacct -P -n -u ${username} -S ${since} -o ${fields}`;
             const out = await executeShellCommand(cmd);
             const lines = out.trim().split('\n').filter(l => l.length > 0);
             const jobs = lines.map(line => {
                 const parts = line.split('|');
-                const [rawJobId, jobName, state, submit, start, end, elapsed, allocCpus, reqMem, exitCode] = parts.concat(Array(10).fill(null));
+                const [rawJobId, jobName, state, submit, start, end, elapsed, allocCpus, reqMem, exitCode, user] = parts.concat(Array(11).fill(null));
                 const jobId = rawJobId ? rawJobId.split('.')[0] : rawJobId;
                 return {
                     id: jobId || rawJobId,
@@ -238,17 +239,23 @@ userRouter.get('/dashboard/stats', async (req, res) => {
                     cpus: allocCpus ? parseInt(allocCpus, 10) : null,
                     memory: reqMem || null,
                     exit_code: exitCode ? (isNaN(parseInt(exitCode,10)) ? null : parseInt(exitCode,10)) : null,
+                    user: user || username || null
                 };
             });
-            // dedupe by id
+            // dedupe by id, then sort by numeric job id descending (newest first)
             const seen = new Set();
-            const uniq = [];
+            let uniq = [];
             for (const j of jobs) {
                 if (!j.id) continue;
                 if (seen.has(j.id)) continue;
                 seen.add(j.id);
                 uniq.push(j);
             }
+            uniq = uniq.slice().sort((a, b) => {
+                const aId = parseInt(String(a.id || '').replace(/\D/g, ''), 10) || 0;
+                const bId = parseInt(String(b.id || '').replace(/\D/g, ''), 10) || 0;
+                return bId - aId;
+            });
             return uniq;
         } catch (e) {
             console.error('PUN getUserJobHistory error', e);
@@ -259,10 +266,14 @@ userRouter.get('/dashboard/stats', async (req, res) => {
     userRouter.get('/history', authenticateToken, async (req, res) => {
         try {
             const days = parseInt(req.query.days || '30', 10) || 30;
+            const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit || '50', 10) || 50));
+            const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
             const username = req.user && req.user.sub;
             if (!username) return res.status(400).json({ success:false, message: 'No user in token' });
             const history = await getUserJobHistory(username, days);
-            return res.json(history);
+            // Apply pagination on the PUN side as well
+            const sliced = (history || []).slice(offset, offset + limit);
+            return res.json(sliced);
         } catch (e) {
             console.error('PUN /history error', e);
             return res.status(500).json({ success:false, message: 'Failed to retrieve history', detail: String(e) });

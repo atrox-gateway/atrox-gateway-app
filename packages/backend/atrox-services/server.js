@@ -238,33 +238,55 @@ async function getSlurmNodeStats() {
             const lines = output.trim().split('\n').filter(l => l.length > 0);
             console.log('sinfo per-node output lines (count=' + lines.length + '):', lines.slice(0, 20)); // Log a sample for debugging
 
-            let nodesActive=0, nodesMaintenance=0, nodesErrors=0;
+            let nodesActive = 0, nodesMaintenance = 0, nodesErrors = 0;
             lines.forEach(line => {
                 // state is the last whitespace-separated token in the line (node names won't contain spaces)
                 const parts = line.trim().split(/\s+/);
                 const state = parts.length ? parts[parts.length - 1].toUpperCase() : '';
-                if (['ALLOCATED', 'IDLE', 'MIXED', 'OK', 'COMPLETED'].includes(state)) {
+
+                // Define semantics:
+                // - nodesActive: nodes that are currently allocated (or partially allocated/mixed)
+                // - nodesMaintenance: nodes under maintenance
+                // - nodesErrors: nodes in down/drained/error states
+                // Note: IDLE should NOT be counted as active — it is available for allocation.
+                if (['ALLOCATED', 'MIXED'].includes(state)) {
                     nodesActive++;
                 } else if (['MAINT', 'MAINTENANCE'].includes(state)) {
                     nodesMaintenance++;
                 } else if (['DRAINED', 'DOWN', 'ERROR', 'FAIL', 'UNKNOWN'].includes(state)) {
                     nodesErrors++;
                 } else {
-                    // Some slurm installations use combined states (e.g. "down*" or "idle~100%"),
-                    // attempt a best-effort match by checking substrings.
-                    const s = state;
-                    if (s.includes('DOWN') || s.includes('DRAIN') || s.includes('FAIL') || s.includes('ERR')) nodesErrors++;
-                    else if (s.includes('MAINT')) nodesMaintenance++;
-                    else if (s.length > 0) nodesActive++; // fallback: count as active to avoid under-reporting
-                    else console.warn('Unrecognized/empty Slurm node state line:', line);
+                    // everything else (e.g., IDLE, COMPLETED, etc.) is considered available / not active
                 }
             });
             const nodesTotal = lines.length; // Total nodes from sinfo per-node output
-            const nodesAvailable = Math.max(0, nodesTotal - nodesMaintenance - nodesErrors);
+            // Available nodes = total minus maintenance, error and currently active (allocated/mixed)
+            const nodesAvailable = Math.max(0, nodesTotal - nodesMaintenance - nodesErrors - nodesActive);
         return { nodesActive, nodesMaintenance, nodesAvailable, nodesErrors, nodesTotal }; // Return nodesTotal for completeness
     } catch (e) {
         console.error('getSlurmNodeStats error', e);
         return { nodesActive:0, nodesMaintenance:0, nodesAvailable:0, nodesErrors:0, nodesTotal:0 };
+    }
+}
+
+// Return a map of nodeName -> slurmState using sinfo per-node output
+async function getSlurmNodeStateMap() {
+    try {
+        const output = await executeShellCommand('sinfo -h -N -o "%N %T"');
+        const lines = output.trim().split('\n').filter(l => l.length > 0);
+        const map = {};
+        lines.forEach(line => {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 2) {
+                const state = parts[parts.length - 1].toUpperCase();
+                const nodeName = parts.slice(0, parts.length - 1).join(' ');
+                map[nodeName] = state;
+            }
+        });
+        return map;
+    } catch (e) {
+        console.error('getSlurmNodeStateMap error', e);
+        return {};
     }
 }
 
@@ -648,6 +670,18 @@ dashboardRouter.get('/stats', async (req, res) => {
             },
             timeout: 5000
         };
+        
+        // For non-admin users, we still want to include global node summaries (state per node)
+        // but we must not expose privileged per-node compute details. Build a lightweight nodes list
+        // from sinfo (name + state) and merge it into the proxied response.
+        let nodesSummary = [];
+        try {
+            const stateMap = await getSlurmNodeStateMap();
+            nodesSummary = Object.keys(stateMap).map(n => ({ name: n, state: stateMap[n] }));
+        } catch (e) {
+            console.warn('Could not build nodes summary for non-admin proxied response:', e);
+            nodesSummary = [];
+        }
 
         const udsReq = http.request(options, (udsRes) => {
             let body = '';
@@ -658,6 +692,11 @@ dashboardRouter.get('/stats', async (req, res) => {
                     if (parsed.success && parsed.data) {
                         // Fusionar las estadísticas de nodos globales con la respuesta del PUN
                         parsed.data = Object.assign({}, parsed.data, globalNodeStats);
+                    }
+                    // Merge a lightweight nodes summary for non-admin users if not present
+                    if (!parsed.data) parsed.data = {};
+                    if (!parsed.data.nodes || !Array.isArray(parsed.data.nodes) || parsed.data.nodes.length === 0) {
+                        parsed.data.nodes = parsed.data.nodes || nodesSummary;
                     }
                     return res.status(udsRes.statusCode || 200).json(parsed);
                 } catch (e) {
@@ -685,9 +724,78 @@ dashboardRouter.get('/stats', async (req, res) => {
     }
 });
 
+// Optional helper endpoint returning per-node details (admin-only)
+dashboardRouter.get('/nodes', async (req, res) => {
+    const token = req.cookies.access_token;
+    if (!token) return res.status(401).json({ success:false, message: 'No session token' });
+    let decoded = null;
+    try {
+        decoded = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+        console.warn('Invalid token in /dashboard/nodes request:', e.message);
+        return res.status(401).json({ success:false, message: 'Invalid session token' });
+    }
+
+    try {
+        if (!decoded || decoded.role !== 'admin') return res.status(403).json({ success:false, message: 'Forbidden: admin only' });
+
+        const globalNodeStats = await getSlurmNodeStats();
+        const nodesToQuery = ['node-01', 'node-02', 'node-storage'];
+        let perNodeStats = [];
+        try {
+            perNodeStats = await getComputeNodeStats(nodesToQuery);
+        } catch (e) {
+            console.warn('Failed to get per-node compute stats for /nodes:', e);
+            perNodeStats = nodesToQuery.map(n => ({ node: n, error: String(e) }));
+        }
+
+        const computeNodes = perNodeStats.filter(p => p.node && (p.node === 'node-01' || p.node === 'node-02'));
+        const storageNode = perNodeStats.find(p => p.node === 'node-storage') || null;
+
+        // Try to enrich per-node results with Slurm state from sinfo
+        const stateMap = await getSlurmNodeStateMap();
+        const enrich = (item) => {
+            if (!item) return item;
+            const name = item.node || item.nodeName || item.node || item.node;
+            const st = stateMap[name];
+            if (st) item.state = st;
+            return item;
+        };
+
+        const enrichedCompute = computeNodes.map(enrich);
+        const enrichedStorage = enrich(storageNode);
+
+        const payload = Object.assign({}, globalNodeStats, { computeNodes: enrichedCompute, storageNode: enrichedStorage });
+        return res.json({ success: true, data: payload });
+    } catch (e) {
+        console.error('Error in /api/v1/dashboard/nodes:', e);
+        return res.status(500).json({ success:false, message: 'Internal server error' });
+    }
+});
+
 app.use('/api/v1/dashboard', dashboardRouter);
 
 const jobsRouter = express.Router();
+
+// Return list of known users from sacct (admin-only)
+jobsRouter.get('/users', authenticateToken, async (req, res) => {
+    try {
+        const decoded = req.user || null;
+        if (!decoded || decoded.role !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
+        const days = parseInt(req.query.days || '30', 10) || 30;
+        const since = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+        // Request User field from sacct; -P pipe format and -n no header
+        const cmd = `sacct -P -n -S ${since} -o User`;
+        const out = await executeShellCommand(cmd, true);
+        const lines = out.trim().split('\n').filter(l => l && l.trim().length > 0);
+        const users = lines.map(l => (l || '').toString().trim()).filter(u => !!u);
+        const uniq = Array.from(new Set(users)).sort();
+        return res.json(uniq);
+    } catch (e) {
+        console.error('/api/v1/jobs/users error', e);
+        return res.status(500).json({ success: false, message: 'Failed to list users', detail: String(e) });
+    }
+});
 
 // History endpoint: devuelve historial de trabajos del usuario (o global para admins)
 jobsRouter.get('/history', authenticateToken, async (req, res) => {
@@ -696,16 +804,27 @@ jobsRouter.get('/history', authenticateToken, async (req, res) => {
         const statusFilter = (req.query.status_filter || '').toString().toLowerCase();
         const decoded = req.user || null; // authenticateToken sets req.user
 
-        // If admin and requested user specified, allow local sacct query
-        if (decoded && decoded.role === 'admin' && req.query.user) {
-            const targetUser = req.query.user.toString();
+        // If admin, allow local sacct query. If req.query.user provided, filter by that user,
+        // otherwise return global history (all users).
+        if (decoded && decoded.role === 'admin') {
+            const targetUser = req.query.user ? req.query.user.toString() : null;
+            const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit || '50', 10) || 50));
+            const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
             const history = await getJobHistory(targetUser, days);
             let filtered = history;
             if (statusFilter && statusFilter !== 'all') {
                 const want = statusFilter;
                 filtered = history.filter(h => (h.status || '').toString().toLowerCase().includes(want));
             }
-            return res.json(filtered);
+            // Ensure ordering by numeric job id descending (highest ID first)
+            filtered = (filtered || []).slice().sort((a, b) => {
+                const aId = parseInt(String(a?.id || '').replace(/\D/g, ''), 10) || 0;
+                const bId = parseInt(String(b?.id || '').replace(/\D/g, ''), 10) || 0;
+                return bId - aId;
+            });
+            // Apply pagination server-side for admin requests
+            const sliced = filtered.slice(offset, offset + limit);
+            return res.json(sliced);
         }
 
         // For non-admin users, proxy to their PUN (user-server) over UDS
@@ -717,9 +836,11 @@ jobsRouter.get('/history', authenticateToken, async (req, res) => {
             return res.status(503).json({ success:false, message: 'User PUN not available' });
         }
 
+        const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit || '50', 10) || 50));
+        const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
         const options = {
             socketPath: punInfo.socketPath,
-            path: `/api/v1/user/history?days=${days}${statusFilter ? `&status_filter=${encodeURIComponent(statusFilter)}` : ''}`,
+            path: `/api/v1/user/history?days=${days}${statusFilter ? `&status_filter=${encodeURIComponent(statusFilter)}` : ''}&limit=${limit}&offset=${offset}`,
             method: 'GET',
             headers: {
                 'Cookie': `access_token=${req.cookies.access_token || ''}`

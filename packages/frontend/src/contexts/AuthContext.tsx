@@ -66,8 +66,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const checkSession = async () => {
       try {
+        // If there's no session-related cookie, avoid calling the dynamic PUN whoami endpoint.
+        // Nginx maps `/api/v1/user` to a per-user upstream using the `user_session` cookie; when
+        // that cookie is absent the upstream name is empty and nginx can return a 500. By checking
+        // cookies here we skip the call entirely for unauthenticated visitors.
+        const hasSessionCookie = typeof document !== 'undefined' && (
+          document.cookie.includes('user_session') || document.cookie.includes('access_token')
+        );
+
+        if (!hasSessionCookie) {
+          // No session: quickly finish without making a network request that could hit an empty upstream
+          setIsLoading(false);
+          return;
+        }
+
         const response = await fetch('/api/v1/user/whoami', { credentials: 'include' });
-        
+
         if (response.ok) {
           const userInfo = await response.json();
 

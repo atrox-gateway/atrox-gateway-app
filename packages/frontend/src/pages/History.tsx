@@ -17,6 +17,7 @@ import {
   AlertTriangle
 } from "lucide-react";
 import { Layout } from "@/components/Layout";
+import { useAuth } from "@/contexts/AuthContext";
 
 // Types for job items returned by the backend
 // Expected API: GET /api/history?days=30&status_filter=completed
@@ -55,8 +56,14 @@ const History = () => {
   const [filter, setFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [dateRange, setDateRange] = useState("week");
+  const [users, setUsers] = useState<string[]>([]);
+  const [selectedUser, setSelectedUser] = useState<string | null>(null);
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [pageSize] = useState(5);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const getStatusBadge = (status: string, exitCode?: number) => {
@@ -152,6 +159,39 @@ const History = () => {
     return parts.join(' ');
   };
 
+  // Robust helpers to extract date/user/output fields from varied backend shapes
+  const parseDateValue = (s?: string | null) => {
+    if (!s) return 0;
+    const ts = Date.parse(s.toString());
+    return isNaN(ts) ? 0 : ts;
+  };
+
+  const getJobUser = (job: any) => {
+    return (
+      job?.user ??
+      job?.username ??
+      job?.owner ??
+      job?.submit_user ??
+      job?.submitter ??
+      job?.user_name ??
+      job?.owner_name ??
+      'No provisto'
+    );
+  };
+
+  const getJobOutput = (job: any) => {
+    return (
+      job?.outputSize ??
+      job?.output_size ??
+      job?.output ??
+      job?.results ??
+      job?.output_size_bytes ??
+      job?.outputSizeBytes ??
+      job?.output_size_bytes ??
+      '-'
+    );
+  };
+
   // Average duration (in seconds) over completed jobs with a duration
   const averageDurationSeconds = useMemo(() => {
     const completedJobs = jobs.filter(j => (j.status || '').toString().toLowerCase() === 'completed');
@@ -175,60 +215,112 @@ const History = () => {
     }
   };
 
-  // Fetch history from backend API when filters change
+  // Helper to load one page (limit/offset). If append=true, append to existing jobs.
+  const loadPage = async (off: number, append = false) => {
+    if (!append) setLoading(true);
+    else setLoadingMore(true);
+    setError(null);
+    try {
+      const days = dateRangeToDays(dateRange);
+      const params = new URLSearchParams();
+      params.set('days', String(days));
+      params.set('limit', String(pageSize));
+      params.set('offset', String(off));
+      if (filter && filter !== 'all') params.set('status_filter', filter);
+      if (selectedUser && selectedUser !== 'all') params.set('user', selectedUser);
+      const url = `/api/v1/jobs/history?${params.toString()}`;
+      const resp = await fetch(url, { credentials: 'include' });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`${resp.status} ${resp.statusText} - ${text}`);
+      }
+      const data = await resp.json();
+      const arr: JobItem[] = Array.isArray(data) ? data : (data.data || []);
+      // Sort results server-side page may still need ordering
+        // Sort by numeric job ID descending (newest by ID first)
+        const sorted = (arr || []).slice().sort((a: any, b: any) => {
+          const aId = parseInt(String(a?.id || '').replace(/\D/g, ''), 10) || 0;
+          const bId = parseInt(String(b?.id || '').replace(/\D/g, ''), 10) || 0;
+          return bId - aId;
+        });
+      if (append) {
+        setJobs(prev => [...prev, ...sorted]);
+      } else {
+        setJobs(sorted);
+      }
+      // update offset & hasMore
+      const received = sorted.length;
+      setOffset(off + received);
+      setHasMore(received === pageSize);
+    } catch (err: any) {
+      console.error('Failed to load history', err);
+      setError(err.message || 'Unknown error');
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  };
+
+  // Reset + load first page when filters change
+  useEffect(() => {
+    setJobs([]);
+    setOffset(0);
+    setHasMore(true);
+    loadPage(0, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter, dateRange, selectedUser]);
+
+  // Fetch users list for admin to populate combobox
+  const auth = useAuth();
   useEffect(() => {
     let mounted = true;
-    async function fetchHistory() {
-      setLoading(true);
-      setError(null);
+    async function fetchUsers() {
       try {
+        if (!auth || !auth.user || auth.user.role !== 'admin') return;
         const days = dateRangeToDays(dateRange);
-        const params = new URLSearchParams();
-        params.set('days', String(days));
-        if (filter && filter !== 'all') params.set('status_filter', filter);
-        // Note: the backend template exposes GET /api/history
-        const url = `/api/v1/jobs/history?${params.toString()}`;
-        const resp = await fetch(url, { credentials: 'include' });
-        if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(`${resp.status} ${resp.statusText} - ${text}`);
-        }
+        const resp = await fetch(`/api/v1/jobs/users?days=${days}`, { credentials: 'include' });
+        if (!resp.ok) return;
         const data = await resp.json();
-        // Ensure array shape
-        const arr: JobItem[] = Array.isArray(data) ? data : (data.data || []);
-        if (mounted) setJobs(arr);
-      } catch (err: any) {
-        console.error('Failed to load history', err);
-        if (mounted) setError(err.message || 'Unknown error');
-      } finally {
-        if (mounted) setLoading(false);
+        if (mounted && Array.isArray(data)) {
+          setUsers(data);
+        }
+      } catch (e) {
+        // ignore
       }
     }
-
-    fetchHistory();
+    fetchUsers();
     return () => { mounted = false; };
-  }, [filter, dateRange]);
+  }, [auth, dateRange]);
 
-  // Apply client-side filters: status and free-text search
+  // Apply client-side filters: status and free-text search, then sort newest->oldest
   const displayedJobs = useMemo(() => {
     const q = (searchTerm || '').toString().trim().toLowerCase();
-    return jobs.filter((job) => {
+    const filtered = jobs.filter((job) => {
       // Status filter
       if (filter && filter !== 'all') {
         const status = (job.status || '').toString().toLowerCase();
         if (!status.includes(filter)) return false;
       }
 
-      // Search term: match id, name, user
+      // Search term: match id, name, user and output
       if (q.length > 0) {
-        const hay = [job.id, job.name, job.user, job.duration, job.memory]
-          .map(s => (s || '').toString().toLowerCase())
+        const hay = [job.id, job.name, getJobUser(job), job.duration, job.memory, getJobOutput(job)]
+          .map((s: any) => (s || '').toString().toLowerCase())
           .join(' ');
         if (!hay.includes(q)) return false;
       }
 
       return true;
     });
+
+    // Ensure ordering newest -> oldest by execution timestamp (prefer start_time, then submit_time, then end_time)
+      // Ensure ordering by numeric job ID descending (highest ID first)
+      const sorted = filtered.slice().sort((a: any, b: any) => {
+        const aId = parseInt(String(a?.id || '').replace(/\D/g, ''), 10) || 0;
+        const bId = parseInt(String(b?.id || '').replace(/\D/g, ''), 10) || 0;
+        return bId - aId;
+      });
+    return sorted;
   }, [jobs, filter, searchTerm]);
 
   return (
@@ -341,6 +433,20 @@ const History = () => {
                   <SelectItem value="all">Todo</SelectItem>
                 </SelectContent>
               </Select>
+              {/* Admin-only: filter by user */}
+              {auth && auth.user && auth.user.role === 'admin' && (
+                <Select value={selectedUser ?? 'all'} onValueChange={(v) => setSelectedUser(v === 'all' ? null : v)}>
+                  <SelectTrigger className="w-full md:w-48">
+                    <SelectValue placeholder="Usuario" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Todos</SelectItem>
+                    {users.map(u => (
+                      <SelectItem key={u} value={u}>{u}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -357,7 +463,7 @@ const History = () => {
                       {getStatusBadge(job.status, job.exit_code)}
                     </CardTitle>
                     <CardDescription>
-                      ID: {job.id} • Usuario: {job.user || 'N/A'}
+                      ID: {job.id} • Usuario: {getJobUser(job)}
                     </CardDescription>
                   </div>
                   <div className="flex gap-2">
@@ -390,7 +496,7 @@ const History = () => {
                   </div>
                   <div>
                     <span className="text-muted-foreground">Salida:</span>
-                    <div>{(job as any).outputSize || job.output_size || "N/A"}</div>
+                    <div>{getJobOutput(job)}</div>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Código:</span>
@@ -414,10 +520,15 @@ const History = () => {
           ))}
         </div>
 
-        {/* Load more or pagination could go here */}
+        {/* Load more button for pagination */}
         <div className="text-center animate-fade-in-up delay-400">
-          <Button variant="outline">
-            Cargar Más Trabajos
+          <Button
+            variant="outline"
+            onClick={() => { if (!loadingMore && hasMore) loadPage(offset, true); }}
+            disabled={loading || loadingMore || !hasMore}
+            title={hasMore ? 'Cargar más trabajos' : 'No hay más trabajos'}
+          >
+            {loadingMore ? 'Cargando...' : (hasMore ? 'Cargar Más Trabajos' : 'No hay más')}
           </Button>
         </div>
       </div>
