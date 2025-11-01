@@ -11,7 +11,7 @@ interface User {
 interface AuthContextType {
   user: User | null;
   login: (username: string, password: string) => Promise<boolean>;
-  register: (username: string, email: string, password: string) => Promise<boolean>;
+  register: (username: string, email: string, password: string, justification?: string) => Promise<boolean>;
   logout: () => void;
   isAuthenticated: boolean;
   isLoading: boolean; // Estado de carga para evitar redirección en el refresh
@@ -89,11 +89,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     checkSession();
   }, []);
 
-  const register = async (username: string, email: string, password: string): Promise<boolean> => {
+  // now accepts an optional justification string provided by the user
+  const register = async (username: string, email: string, password: string, justification?: string): Promise<boolean> => {
     const response = await fetch('/api/v1/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, email, password })
+      body: JSON.stringify({ username, email, password, justification })
     });
 
     if (!response.ok) {

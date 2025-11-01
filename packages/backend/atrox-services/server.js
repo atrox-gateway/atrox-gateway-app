@@ -140,6 +140,52 @@ async function getSlurmJobStats(username = null) {
     }
 }
 
+// Obtener historial de trabajos usando sacct
+async function getJobHistory(username = null, days = 30) {
+    try {
+        const since = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+        // Usar salida 'pipe' para parseo más sencillo, sin cabecera (-n)
+        // Campos: JobID|JobName|State|Submit|Start|End|Elapsed|AllocCPUS|ReqMem|ExitCode
+        const fields = 'JobID,JobName,State,Submit,Start,End,Elapsed,AllocCPUS,ReqMem,ExitCode,User';
+        const userFilter = username ? `-u ${username}` : '';
+        const cmd = `sacct -P -n ${userFilter} -S ${since} -o ${fields}`;
+        const out = await executeShellCommand(cmd, true);
+        const lines = out.trim().split('\n').filter(l => l.length > 0);
+        const jobs = lines.map(line => {
+            const parts = line.split('|');
+            // Ensure expected length
+            const [rawJobId, jobName, state, submit, start, end, elapsed, allocCpus, reqMem, exitCode, user] = parts.concat(Array(11).fill(null));
+            const jobId = rawJobId ? rawJobId.split('.')[0] : rawJobId; // strip step suffix
+            return {
+                id: jobId || rawJobId,
+                name: jobName || null,
+                status: state ? state.toLowerCase() : null,
+                submit_time: submit || null,
+                start_time: start || null,
+                end_time: end || null,
+                duration: elapsed || null,
+                cpus: allocCpus ? parseInt(allocCpus, 10) : null,
+                memory: reqMem || null,
+                exit_code: exitCode ? (isNaN(parseInt(exitCode,10)) ? null : parseInt(exitCode,10)) : null,
+                user: user || null
+            };
+        });
+        // Deduplicate by id (keep first occurrence)
+        const seen = new Set();
+        const uniq = [];
+        for (const j of jobs) {
+            if (!j.id) continue;
+            if (seen.has(j.id)) continue;
+            seen.add(j.id);
+            uniq.push(j);
+        }
+        return uniq;
+    } catch (e) {
+        console.error('getJobHistory error', e);
+        throw e;
+    }
+}
+
 // Estadísticas globales: recursos del sistema
 async function getSystemResourceUsage() {
     try {
@@ -154,8 +200,27 @@ async function getSystemResourceUsage() {
         const storageLine = storageOutput.split('\n')[1];
         const storageUsage = parseInt(storageLine.split(/\s+/)[4].replace('%',''));
 
-        // CPU usage: placeholder (could parse /proc/stat or use mpstat)
-        const cpuUsage = Math.floor(Math.random() * 100);
+        // CPU usage: compute from /proc/stat sampling to get an instantaneous percent
+        const readCpuStat = () => {
+            const stat = fs.readFileSync('/proc/stat', 'utf8');
+            const cpuLine = stat.split('\n').find(l => l.startsWith('cpu '));
+            if (!cpuLine) return null;
+            const parts = cpuLine.trim().split(/\s+/).slice(1).map(p => parseInt(p, 10) || 0);
+            // fields: user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice
+            const idle = (parts[3] || 0) + (parts[4] || 0);
+            const total = parts.reduce((a, b) => a + b, 0);
+            return { idle, total };
+        };
+
+        const a = readCpuStat();
+        await new Promise(r => setTimeout(r, 200));
+        const b = readCpuStat();
+        let cpuUsage = 0;
+        if (a && b) {
+            const idleDelta = b.idle - a.idle;
+            const totalDelta = b.total - a.total;
+            cpuUsage = totalDelta > 0 ? Math.round((1 - idleDelta / totalDelta) * 100) : 0;
+        }
 
         return { cpuUsage, memoryUsage, storageUsage };
     } catch (e) {
@@ -167,29 +232,127 @@ async function getSystemResourceUsage() {
 // Estadísticas globales: nodos Slurm
 async function getSlurmNodeStats() {
     try {
-        const output = await executeShellCommand('sinfo -h -o "%T"');
-        const lines = output.trim().split('\n').filter(l => l.length > 0);
-        console.log('sinfo output lines:', lines); // Log the output for debugging
+        // Request per-node output from sinfo (-N) so we count nodes individually instead of aggregated partition lines
+        // Use "%N %T" so we can robustly parse the node name and its state (state is the last token)
+        const output = await executeShellCommand('sinfo -h -N -o "%N %T"');
+            const lines = output.trim().split('\n').filter(l => l.length > 0);
+            console.log('sinfo per-node output lines (count=' + lines.length + '):', lines.slice(0, 20)); // Log a sample for debugging
 
-        let nodesActive=0, nodesMaintenance=0, nodesErrors=0;
-        lines.forEach(state => {
-            const normalizedState = state.trim().toUpperCase(); // Normalize state for robust comparison
-            if (['ALLOCATED', 'IDLE', 'MIXED', 'OK'].includes(normalizedState)) { // Added 'OK' as a potential active state
-                nodesActive++;
-            } else if (['MAINT', 'MAINTENANCE'].includes(normalizedState)) { // Added 'MAINTENANCE'
-                nodesMaintenance++;
-            } else if (['DRAINED', 'DOWN', 'ERROR', 'FAIL'].includes(normalizedState)) { // Added 'ERROR', 'FAIL'
-                nodesErrors++;
-            } else {
-                console.warn('Unrecognized Slurm node state:', state); // Log unrecognized states
-            }
-        });
-        const nodesTotal = lines.length; // Total nodes from sinfo output
-        const nodesAvailable = Math.max(0, nodesTotal - nodesMaintenance - nodesErrors); // Calculate available nodes based on total
+            let nodesActive=0, nodesMaintenance=0, nodesErrors=0;
+            lines.forEach(line => {
+                // state is the last whitespace-separated token in the line (node names won't contain spaces)
+                const parts = line.trim().split(/\s+/);
+                const state = parts.length ? parts[parts.length - 1].toUpperCase() : '';
+                if (['ALLOCATED', 'IDLE', 'MIXED', 'OK', 'COMPLETED'].includes(state)) {
+                    nodesActive++;
+                } else if (['MAINT', 'MAINTENANCE'].includes(state)) {
+                    nodesMaintenance++;
+                } else if (['DRAINED', 'DOWN', 'ERROR', 'FAIL', 'UNKNOWN'].includes(state)) {
+                    nodesErrors++;
+                } else {
+                    // Some slurm installations use combined states (e.g. "down*" or "idle~100%"),
+                    // attempt a best-effort match by checking substrings.
+                    const s = state;
+                    if (s.includes('DOWN') || s.includes('DRAIN') || s.includes('FAIL') || s.includes('ERR')) nodesErrors++;
+                    else if (s.includes('MAINT')) nodesMaintenance++;
+                    else if (s.length > 0) nodesActive++; // fallback: count as active to avoid under-reporting
+                    else console.warn('Unrecognized/empty Slurm node state line:', line);
+                }
+            });
+            const nodesTotal = lines.length; // Total nodes from sinfo per-node output
+            const nodesAvailable = Math.max(0, nodesTotal - nodesMaintenance - nodesErrors);
         return { nodesActive, nodesMaintenance, nodesAvailable, nodesErrors, nodesTotal }; // Return nodesTotal for completeness
     } catch (e) {
         console.error('getSlurmNodeStats error', e);
         return { nodesActive:0, nodesMaintenance:0, nodesAvailable:0, nodesErrors:0, nodesTotal:0 };
+    }
+}
+
+// Estadísticas detalladas para nodos específicos (CPU/Mem asignado vs capacidad)
+async function getComputeNodeStats(nodes = []) {
+    try {
+        const results = [];
+        for (const node of nodes) {
+            try {
+                // scontrol show node <node> -o -> key=value tokens
+                const out = await executeShellCommand(`scontrol show node ${node} -o`);
+                const tok = out.trim().split(/\s+/);
+                const data = {};
+                tok.forEach(t => {
+                    if (!t.includes('=')) return;
+                    const [k, v] = t.split('=');
+                    data[k] = v;
+                });
+
+                const cpuTot = parseInt(data.CPUTot || '0', 10);
+                const cpuAlloc = parseInt(data.CPUAlloc || data.CPUAlloc || '0', 10);
+                const cpuLoad = parseFloat(data.CPULoad || '0') || 0;
+                const realMem = parseInt(data.RealMemory || '0', 10); // MB
+                const allocMem = parseInt(data.AllocMem || '0', 10); // MB
+
+                const cpuAssignedPct = cpuTot > 0 ? Math.round((cpuAlloc / cpuTot) * 100) : 0;
+                const memAssignedPct = realMem > 0 ? Math.round((allocMem / realMem) * 100) : 0;
+
+                results.push({
+                    node,
+                    cpuTot,
+                    cpuAlloc,
+                    cpuAssignedPct,
+                    cpuLoad,
+                    realMemMB: realMem,
+                    allocMemMB: allocMem,
+                    memAssignedPct
+                });
+            } catch (e) {
+                console.error(`Error getting scontrol for node ${node}:`, e);
+                results.push({ node, error: String(e) });
+            }
+        }
+        return results;
+    } catch (e) {
+        console.error('getComputeNodeStats error', e);
+        return nodes.map(n => ({ node: n, error: String(e) }));
+    }
+}
+
+// Intento de obtener uso de disco para el nodo de storage buscando montajes NFS locales
+async function getStorageUsageForNode(nodeName) {
+    try {
+        // Obtener todas las líneas de mount; usar '|| true' para evitar código de salida !=0
+        const mountOut = await executeShellCommand('mount || true');
+        const mountLines = mountOut.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+        // Intentar encontrar una línea que contenga el nombre del nodo
+        let chosen = mountLines.find(l => l.includes(nodeName));
+        if (!chosen) {
+            // Si no encontramos por nombre, elegir el primer montaje NFS disponible (nfs o nfs4)
+            chosen = mountLines.find(l => l.includes(' type nfs') || l.includes(' type nfs4'));
+        }
+
+        if (!chosen) return { error: 'No NFS mount found locally' };
+
+        // Formato esperado: '<source> on <mountpoint> type nfs...'
+        const onIndex = chosen.indexOf(' on ');
+        if (onIndex === -1) return { error: 'Unexpected mount line format' };
+        const source = chosen.substring(0, onIndex).trim();
+        const afterOn = chosen.substring(onIndex + 4);
+        const typeIndex = afterOn.indexOf(' type ');
+        const mountpoint = typeIndex !== -1 ? afterOn.substring(0, typeIndex).trim() : afterOn.split(/	|\s+/)[0];
+
+        // Ejecutar df de forma robusta
+        const dfOut = await executeShellCommand(`df -P ${mountpoint}`);
+        const dfLines = dfOut.trim().split('\n');
+        if (dfLines.length < 2) return { error: 'df output unexpected' };
+        const cols = dfLines[1].split(/\s+/);
+        // cols: Filesystem, 1K-blocks, Used, Available, Use%, Mounted on
+        const sizeKB = parseInt(cols[1] || '0', 10);
+        const usedKB = parseInt(cols[2] || '0', 10);
+        const availKB = parseInt(cols[3] || '0', 10);
+        const usePercent = parseInt((cols[4] || '0').replace('%',''), 10) || 0;
+
+        return { source, mountpoint, sizeKB, usedKB, availKB, usePercent };
+    } catch (e) {
+        return { error: String(e) };
     }
 }
 
@@ -199,10 +362,15 @@ const authRouter = express.Router();
 
 // Endpoint público para crear una solicitud de registro pendiente de aprobación
 authRouter.post('/register', async (req, res) => {
-    const { username, email, password } = req.body || {};
+    const { username, email, password, justification } = req.body || {};
 
     if (!username || !email || !password) {
         return res.status(400).json({ message: 'username, email and password are required.' });
+    }
+
+    // Require a short justification so admins have context when approving
+    if (!justification || justification.toString().trim().length < 10) {
+        return res.status(400).json({ message: 'justification is required (min 10 characters).' });
     }
 
     try {
@@ -221,7 +389,7 @@ authRouter.post('/register', async (req, res) => {
 
         // Guardar la solicitud en Redis. Nota: almacenamos la contraseña temporalmente para poder crear el usuario
         // cuando el admin lo apruebe. En producción sería recomendable cifrarla o usar otro flujo seguro.
-        const payload = JSON.stringify({ username, email, password, createdAt: new Date().toISOString() });
+    const payload = JSON.stringify({ username, email, password, justification: justification.toString().trim(), createdAt: new Date().toISOString() });
         await RedisClient.set(pendingKey, payload);
 
         return res.status(202).json({ message: 'Registration received and pending admin approval.' });
@@ -229,6 +397,34 @@ authRouter.post('/register', async (req, res) => {
     } catch (error) {
         console.error('Error handling registration request:', error);
         return res.status(500).json({ message: 'Internal server error.' });
+    }
+});
+
+// Endpoint público para checar disponibilidad de username (real-time friendly)
+// GET /api/v1/auth/check-username?username=foo
+authRouter.get('/check-username', async (req, res) => {
+    const username = (req.query.username || '').toString().trim();
+    if (!username) return res.status(400).json({ available: false, message: 'username query param required' });
+
+    try {
+        // 1 Check if user already exists in system via manage_user.sh 'show'
+        const adminLevel = await getAdminLevelFromSlurm(username);
+        if (adminLevel && adminLevel !== 'None') {
+            return res.json({ available: false, message: 'User already exists on the system' });
+        }
+
+        // 2 Check pending registrations in Redis
+        const pendingKey = `pending:${username}`;
+        const existing = await RedisClient.get(pendingKey);
+        if (existing) {
+            return res.json({ available: false, message: 'Registration request is already pending for this username' });
+        }
+
+        // Otherwise available
+        return res.json({ available: true, message: 'Username available' });
+    } catch (err) {
+        console.error('Error checking username availability for', username, err);
+        return res.status(500).json({ available: false, message: 'Internal server error' });
     }
 });
 
@@ -412,7 +608,24 @@ dashboardRouter.get('/stats', async (req, res) => {
                 getSystemResourceUsage()
             ]);
 
-            const payload = Object.assign({}, jobStats, resourceUsage, globalNodeStats); // Incluir globalNodeStats
+            // Obtener estadísticas detalladas para los nodos de cómputo indicados
+            // NOTE: usar explícitamente node-01 y node-02 para cómputo y node-storage para almacenamiento
+            const nodesToQuery = ['node-01', 'node-02', 'node-storage'];
+            let perNodeStats = [];
+            try {
+                perNodeStats = await getComputeNodeStats(nodesToQuery);
+            } catch (e) {
+                console.warn('Failed to get per-node compute stats:', e);
+                perNodeStats = nodesToQuery.map(n => ({ node: n, error: String(e) }));
+            }
+
+            const computeNodes = perNodeStats.filter(p => p.node && (p.node === 'node-01' || p.node === 'node-02'));
+            const storageNode = perNodeStats.find(p => p.node === 'node-storage') || null;
+
+            const payload = Object.assign({}, jobStats, resourceUsage, globalNodeStats, {
+                computeNodes,
+                storageNode
+            });
             return res.json({ success: true, data: payload });
         }
 
@@ -473,6 +686,86 @@ dashboardRouter.get('/stats', async (req, res) => {
 });
 
 app.use('/api/v1/dashboard', dashboardRouter);
+
+const jobsRouter = express.Router();
+
+// History endpoint: devuelve historial de trabajos del usuario (o global para admins)
+jobsRouter.get('/history', authenticateToken, async (req, res) => {
+    try {
+        const days = parseInt(req.query.days || '30', 10) || 30;
+        const statusFilter = (req.query.status_filter || '').toString().toLowerCase();
+        const decoded = req.user || null; // authenticateToken sets req.user
+
+        // If admin and requested user specified, allow local sacct query
+        if (decoded && decoded.role === 'admin' && req.query.user) {
+            const targetUser = req.query.user.toString();
+            const history = await getJobHistory(targetUser, days);
+            let filtered = history;
+            if (statusFilter && statusFilter !== 'all') {
+                const want = statusFilter;
+                filtered = history.filter(h => (h.status || '').toString().toLowerCase().includes(want));
+            }
+            return res.json(filtered);
+        }
+
+        // For non-admin users, proxy to their PUN (user-server) over UDS
+        if (!decoded) return res.status(401).json({ success:false, message: 'No session' });
+        const username = decoded.sub;
+        const activePuns = punManager.getActivePuns();
+        const punInfo = activePuns.get(username);
+        if (!punInfo || !punInfo.socketPath) {
+            return res.status(503).json({ success:false, message: 'User PUN not available' });
+        }
+
+        const options = {
+            socketPath: punInfo.socketPath,
+            path: `/api/v1/user/history?days=${days}${statusFilter ? `&status_filter=${encodeURIComponent(statusFilter)}` : ''}`,
+            method: 'GET',
+            headers: {
+                'Cookie': `access_token=${req.cookies.access_token || ''}`
+            },
+            timeout: 5000
+        };
+
+        const udsReq = http.request(options, (udsRes) => {
+            let body = '';
+            udsRes.on('data', (chunk) => { body += chunk.toString(); });
+            udsRes.on('end', () => {
+                try {
+                    const parsed = JSON.parse(body);
+                    return res.status(udsRes.statusCode || 200).json(parsed);
+                } catch (e) {
+                    console.error('Error parsing PUN history response:', e, 'raw:', body);
+                    return res.status(502).json({ success:false, message: 'Invalid response from PUN' });
+                }
+            });
+        });
+
+        udsReq.on('error', (err) => {
+            console.error('Error connecting to PUN socket for history:', err.message);
+            return res.status(502).json({ success:false, message: 'Failed to reach PUN', detail: err.message });
+        });
+
+        udsReq.on('timeout', () => {
+            udsReq.destroy();
+            return res.status(504).json({ success:false, message: 'PUN request timed out' });
+        });
+
+        udsReq.end();
+    } catch (e) {
+        console.error('/api/v1/jobs/history error', e);
+        return res.status(500).json({ success:false, message: 'Failed to retrieve history', detail: String(e) });
+    }
+});
+
+app.use('/api/v1/jobs', jobsRouter);
+
+// Compatibility route: keep previous frontend path `/api/history` working
+app.get('/api/history', authenticateToken, (req, res) => {
+    const qs = new URLSearchParams(req.query).toString();
+    // Use 307 to preserve method semantics (GET)
+    res.redirect(307, `/api/v1/jobs/history${qs ? `?${qs}` : ''}`);
+});
 
 app.listen(LISTEN_PORT, () => {
     console.log(`🚀 Portero service listening on port ${LISTEN_PORT}`);

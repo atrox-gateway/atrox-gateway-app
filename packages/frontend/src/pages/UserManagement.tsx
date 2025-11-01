@@ -111,7 +111,7 @@ const UserManagement = () => {
       throw new Error(err.message || 'Error al cargar las solicitudes.');
     }
     const data = await response.json();
-    return data.details as Array<{ username: string; email: string; createdAt: string }>;
+    return data.details as Array<{ username: string; email: string; createdAt: string; justification?: string }>;
   };
 
   const { data: registrations, refetch: refetchRegistrations, isLoading: regsLoading } = useQuery({
@@ -376,6 +376,7 @@ const UserManagement = () => {
                     <TableRow>
                       <TableHead>Usuario</TableHead>
                       <TableHead>Email</TableHead>
+                      <TableHead>Justificación</TableHead>
                       <TableHead>Fecha</TableHead>
                       <TableHead className="text-right">Acciones</TableHead>
                     </TableRow>
@@ -385,6 +386,9 @@ const UserManagement = () => {
                       <TableRow key={r.username}>
                         <TableCell className="font-medium">{r.username}</TableCell>
                         <TableCell>{r.email}</TableCell>
+                        <TableCell className="max-w-xs">
+                          <div className="text-sm text-muted-foreground truncate">{r.justification || '—'}</div>
+                        </TableCell>
                         <TableCell>{new Date(r.createdAt).toLocaleString()}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end gap-2">

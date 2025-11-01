@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -18,70 +18,46 @@ import {
 } from "lucide-react";
 import { Layout } from "@/components/Layout";
 
-// Mock historical data
-const mockHistory = [
-  {
-    id: "job_001",
-    name: "Análisis RNA-Seq Dataset",
-    status: "completed",
-    submitTime: "2024-01-15 14:30:00",
-    startTime: "2024-01-15 14:32:15",
-    endTime: "2024-01-15 16:15:30",
-    duration: "1h 43m 15s",
-    cpus: 8,
-    memory: "16GB",
-    user: "Dr. García",
-    exitCode: 0,
-    outputSize: "234 MB"
-  },
-  {
-    id: "job_002", 
-    name: "Simulación Molecular v2.1",
-    status: "completed",
-    submitTime: "2024-01-14 09:15:00",
-    startTime: "2024-01-14 09:17:45",
-    endTime: "2024-01-14 14:22:10",
-    duration: "5h 4m 25s",
-    cpus: 16,
-    memory: "32GB",
-    user: "Ana López",
-    exitCode: 0,
-    outputSize: "1.2 GB"
-  },
-  {
-    id: "job_003",
-    name: "ML Training Deep Learning",
-    status: "failed",
-    submitTime: "2024-01-13 16:00:00",
-    startTime: "2024-01-13 16:02:30",
-    endTime: "2024-01-13 17:45:15",
-    duration: "1h 42m 45s",
-    cpus: 12,
-    memory: "24GB",
-    user: "Carlos Ruiz",
-    exitCode: 1,
-    errorMsg: "Out of memory error"
-  },
-  {
-    id: "job_004",
-    name: "Procesamiento Imágenes Batch",
-    status: "completed",
-    submitTime: "2024-01-12 11:30:00", 
-    startTime: "2024-01-12 11:31:20",
-    endTime: "2024-01-12 13:15:45",
-    duration: "1h 44m 25s",
-    cpus: 6,
-    memory: "12GB",
-    user: "María Silva",
-    exitCode: 0,
-    outputSize: "567 MB"
-  }
-];
+// Types for job items returned by the backend
+// Expected API: GET /api/history?days=30&status_filter=completed
+// Response: Array of objects with at least the following fields:
+// {
+//   id: string,
+//   name: string,
+//   status: 'completed'|'failed'|'cancelled'|string,
+//   submit_time?: string,    // ISO timestamp
+//   duration?: string,
+//   cpus?: number,
+//   memory?: string,
+//   user?: string,
+//   exit_code?: number,
+//   output_size?: string,
+//   error_msg?: string
+// }
+
+type JobItem = {
+  id: string;
+  name: string;
+  status: string;
+  submit_time?: string;
+  start_time?: string;
+  end_time?: string;
+  duration?: string;
+  cpus?: number;
+  memory?: string;
+  user?: string;
+  exit_code?: number;
+  output_size?: string;
+  error_msg?: string;
+};
 
 const History = () => {
   const [filter, setFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [dateRange, setDateRange] = useState("week");
+  const [jobs, setJobs] = useState<JobItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const getStatusBadge = (status: string, exitCode?: number) => {
     switch (status) {
@@ -111,16 +87,149 @@ const History = () => {
     }
   };
 
+  // Compute summary metrics from fetched jobs
   const getEfficiencyMetrics = () => {
-    const completed = mockHistory.filter(job => job.status === "completed").length;
-    const failed = mockHistory.filter(job => job.status === "failed").length;
-    const total = mockHistory.length;
-    const successRate = Math.round((completed / total) * 100);
-    
+    const total = jobs.length || 0;
+    const completed = jobs.filter(job => job.status === "completed").length;
+    const failed = jobs.filter(job => job.status === "failed").length;
+    const successRate = total > 0 ? Math.round((completed / total) * 100) : 0;
     return { completed, failed, total, successRate };
   };
 
-  const metrics = getEfficiencyMetrics();
+  const metrics = useMemo(() => getEfficiencyMetrics(), [jobs]);
+
+  // Helpers to parse and format durations from different possible formats
+  const parseDurationToSeconds = (d?: string | null) => {
+    if (!d) return 0;
+    const s = d.toString().trim();
+    // Format like '1h 43m 15s'
+    const hmRegex = /(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/i;
+    const m = hmRegex.exec(s);
+    if (m && (m[1] || m[2] || m[3])) {
+      const hh = parseInt(m[1] || '0', 10);
+      const mm = parseInt(m[2] || '0', 10);
+      const ss = parseInt(m[3] || '0', 10);
+      return hh * 3600 + mm * 60 + ss;
+    }
+
+    // Format like '1-02:03:04' (days-HH:MM:SS) or 'HH:MM:SS' or 'MM:SS'
+    if (s.includes('-')) {
+      const [daysPart, timePart] = s.split('-');
+      const days = parseInt(daysPart || '0', 10) || 0;
+      const parts = timePart.split(':').map(p => parseInt(p || '0', 10));
+      while (parts.length < 3) parts.unshift(0);
+      const [hh, mm, ss] = parts;
+      return days * 86400 + hh * 3600 + mm * 60 + ss;
+    }
+
+    const cols = s.split(':').map(p => parseInt(p || '0', 10));
+    if (cols.length === 3) {
+      const [hh, mm, ss] = cols;
+      return hh * 3600 + mm * 60 + ss;
+    }
+    if (cols.length === 2) {
+      const [mm, ss] = cols;
+      return mm * 60 + ss;
+    }
+
+    // Fallback: try parse seconds
+    const maybe = parseInt(s.replace(/[^0-9]/g, '' ) || '0', 10);
+    return isNaN(maybe) ? 0 : maybe;
+  };
+
+  const formatSeconds = (secs: number) => {
+    if (!secs || secs <= 0) return 'N/A';
+    const days = Math.floor(secs / 86400);
+    secs %= 86400;
+    const hours = Math.floor(secs / 3600);
+    secs %= 3600;
+    const minutes = Math.floor(secs / 60);
+    const parts = [];
+    if (days) parts.push(`${days}d`);
+    if (hours) parts.push(`${hours}h`);
+    if (minutes) parts.push(`${minutes}m`);
+    if (parts.length === 0) parts.push(`${secs}s`);
+    return parts.join(' ');
+  };
+
+  // Average duration (in seconds) over completed jobs with a duration
+  const averageDurationSeconds = useMemo(() => {
+    const completedJobs = jobs.filter(j => (j.status || '').toString().toLowerCase() === 'completed');
+    const durations = completedJobs.map(j => parseDurationToSeconds(j.duration || j.submit_time || j.end_time || j.end_time)).filter(n => n > 0);
+    if (durations.length === 0) return 0;
+    const sum = durations.reduce((a, b) => a + b, 0);
+    return Math.round(sum / durations.length);
+  }, [jobs]);
+
+  const averageDurationFormatted = useMemo(() => formatSeconds(averageDurationSeconds), [averageDurationSeconds]);
+
+  // Map UI dateRange to days parameter for the API
+  const dateRangeToDays = (range: string) => {
+    switch (range) {
+      case 'today': return 1;
+      case 'week': return 7;
+      case 'month': return 30;
+      case 'quarter': return 90;
+      case 'all': return 3650;
+      default: return 30;
+    }
+  };
+
+  // Fetch history from backend API when filters change
+  useEffect(() => {
+    let mounted = true;
+    async function fetchHistory() {
+      setLoading(true);
+      setError(null);
+      try {
+        const days = dateRangeToDays(dateRange);
+        const params = new URLSearchParams();
+        params.set('days', String(days));
+        if (filter && filter !== 'all') params.set('status_filter', filter);
+        // Note: the backend template exposes GET /api/history
+        const url = `/api/v1/jobs/history?${params.toString()}`;
+        const resp = await fetch(url, { credentials: 'include' });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(`${resp.status} ${resp.statusText} - ${text}`);
+        }
+        const data = await resp.json();
+        // Ensure array shape
+        const arr: JobItem[] = Array.isArray(data) ? data : (data.data || []);
+        if (mounted) setJobs(arr);
+      } catch (err: any) {
+        console.error('Failed to load history', err);
+        if (mounted) setError(err.message || 'Unknown error');
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    }
+
+    fetchHistory();
+    return () => { mounted = false; };
+  }, [filter, dateRange]);
+
+  // Apply client-side filters: status and free-text search
+  const displayedJobs = useMemo(() => {
+    const q = (searchTerm || '').toString().trim().toLowerCase();
+    return jobs.filter((job) => {
+      // Status filter
+      if (filter && filter !== 'all') {
+        const status = (job.status || '').toString().toLowerCase();
+        if (!status.includes(filter)) return false;
+      }
+
+      // Search term: match id, name, user
+      if (q.length > 0) {
+        const hay = [job.id, job.name, job.user, job.duration, job.memory]
+          .map(s => (s || '').toString().toLowerCase())
+          .join(' ');
+        if (!hay.includes(q)) return false;
+      }
+
+      return true;
+    });
+  }, [jobs, filter, searchTerm]);
 
   return (
     <Layout>
@@ -180,9 +289,9 @@ const History = () => {
               <TrendingUp className="h-4 w-4 text-primary" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">2h 35m</div>
+              <div className="text-2xl font-bold">{averageDurationFormatted}</div>
               <p className="text-xs text-muted-foreground">
-                -15% vs mes anterior
+                Basado en {jobs.filter(j => (j.status || '').toString().toLowerCase() === 'completed').length} trabajos completados
               </p>
             </CardContent>
           </Card>
@@ -238,17 +347,17 @@ const History = () => {
 
         {/* History List */}
         <div className="space-y-4 animate-fade-in-up delay-300">
-          {mockHistory.map((job) => (
+          {displayedJobs.map((job) => (
             <Card key={job.id} className="card-professional">
               <CardHeader>
                 <div className="flex justify-between items-start">
                   <div>
                     <CardTitle className="flex items-center gap-3">
                       {job.name}
-                      {getStatusBadge(job.status, job.exitCode)}
+                      {getStatusBadge(job.status, job.exit_code)}
                     </CardTitle>
                     <CardDescription>
-                      ID: {job.id} • Usuario: {job.user}
+                      ID: {job.id} • Usuario: {job.user || 'N/A'}
                     </CardDescription>
                   </div>
                   <div className="flex gap-2">
@@ -265,7 +374,7 @@ const History = () => {
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 text-sm">
                   <div>
                     <span className="text-muted-foreground">Enviado:</span>
-                    <div>{job.submitTime}</div>
+                    <div>{job.submit_time || job.start_time || 'N/A'}</div>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Duración:</span>
@@ -273,30 +382,30 @@ const History = () => {
                   </div>
                   <div>
                     <span className="text-muted-foreground">CPUs:</span>
-                    <div>{job.cpus}</div>
+                    <div>{job.cpus ?? 'N/A'}</div>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Memoria:</span>
-                    <div>{job.memory}</div>
+                    <div>{job.memory ?? 'N/A'}</div>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Salida:</span>
-                    <div>{job.outputSize || "N/A"}</div>
+                    <div>{(job as any).outputSize || job.output_size || "N/A"}</div>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Código:</span>
-                    <div className={job.exitCode === 0 ? "text-success" : "text-destructive"}>
-                      {job.exitCode}
+                    <div className={(job as any).exitCode === 0 || job.exit_code === 0 ? "text-success" : "text-destructive"}>
+                      {(job as any).exitCode ?? job.exit_code ?? 'N/A'}
                     </div>
                   </div>
                 </div>
                 
-                {job.status === "failed" && job.errorMsg && (
+                {job.status === "failed" && (job as any).errorMsg && (
                   <div className="mt-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
                     <div className="flex items-center gap-2 text-destructive text-sm">
                       <AlertTriangle className="h-4 w-4" />
                       <span className="font-medium">Error:</span>
-                      {job.errorMsg}
+                      {(job as any).errorMsg || job.error_msg}
                     </div>
                   </div>
                 )}

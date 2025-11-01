@@ -135,6 +135,10 @@ const Files = () => {
   const [createName, setCreateName] = useState('');
   const [createContent, setCreateContent] = useState('');
 
+  // Folder creation state
+  const [createFolderDialogOpen, setCreateFolderDialogOpen] = useState(false);
+  const [createFolderName, setCreateFolderName] = useState('');
+
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editFilePath, setEditFilePath] = useState('');
   const [editFileName, setEditFileName] = useState('');
@@ -334,6 +338,11 @@ const Files = () => {
     setCreateDialogOpen(true);
   }
 
+  const handleCreateFolder = () => {
+    setCreateFolderName('');
+    setCreateFolderDialogOpen(true);
+  }
+
   const confirmCreate = async () => {
     if (!createName) return toast({ title: 'Nombre requerido', description: 'Introduce un nombre para el archivo.' });
     const filePath = currentPath.endsWith('/') ? `${currentPath}${createName}` : `${currentPath}/${createName}`;
@@ -350,6 +359,32 @@ const Files = () => {
       fetchFiles(currentPath);
     } catch (err: any) {
       toast({ title: 'Error', description: err.message || 'Error creando archivo' });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  const confirmCreateFolder = async () => {
+    if (!createFolderName) return toast({ title: 'Nombre requerido', description: 'Introduce un nombre para la carpeta.' });
+    const folderPath = currentPath.endsWith('/') ? `${currentPath}${createFolderName}` : `${currentPath}/${createFolderName}`;
+    setIsLoading(true);
+    try {
+      // Assumption: backend exposes POST /api/v1/user/folder { path }
+      const resp = await fetch('/api/v1/user/folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folderPath }) });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(txt || `Error: ${resp.status}`);
+      }
+      const data = await resp.json().catch(() => ({ success: true }));
+      // If backend returns a JSON with success flag, respect it; otherwise assume success on 2xx
+      if (data && typeof data.success !== 'undefined' && !data.success) {
+        throw new Error(data.message || 'Error creando carpeta');
+      }
+      toast({ title: 'Carpeta creada', description: `${createFolderName} creada.` });
+      setCreateFolderDialogOpen(false);
+      fetchFiles(currentPath);
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message || 'Error creando carpeta' });
     } finally {
       setIsLoading(false);
     }
@@ -463,6 +498,9 @@ const Files = () => {
             <Button className="btn-hero" onClick={handleCreateFile}>
               Nuevo archivo
             </Button>
+            <Button className="btn-ghost btn-hero" onClick={handleCreateFolder}>
+              Nueva carpeta
+            </Button>
             <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={handleFileInput} />
             <Button className="btn-hero" onClick={handleUploadClick}>
               <Upload className="w-4 h-4 mr-2" />
@@ -523,6 +561,23 @@ const Files = () => {
             <DialogFooter>
               <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>Cancelar</Button>
               <Button onClick={confirmCreate}>Crear</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Create folder dialog */}
+        <Dialog open={createFolderDialogOpen} onOpenChange={setCreateFolderDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Crear nueva carpeta</DialogTitle>
+              <DialogDescription>Introduce el nombre de la carpeta (relativo a la ruta actual).</DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2">
+              <Input placeholder="mi_carpeta" value={createFolderName} onChange={(e) => setCreateFolderName(e.target.value)} />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setCreateFolderDialogOpen(false)}>Cancelar</Button>
+              <Button onClick={confirmCreateFolder}>Crear carpeta</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

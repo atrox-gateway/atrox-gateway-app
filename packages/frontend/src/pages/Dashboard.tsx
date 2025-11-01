@@ -18,18 +18,7 @@ import {
 import { useState, useEffect, useCallback } from "react";
 import { Layout } from "@/components/Layout";
 import { useAuth } from "@/contexts/AuthContext";
-import { AdminPanel } from "@/components/AdminPanel";
-
-// Eliminado: Mock data - en producción vendría del backend
-// const mockStats = {
-//   totalJobs: 247,
-//   runningJobs: 12,
-//   queuedJobs: 8,
-//   completedToday: 15,
-//   cpuUsage: 78,
-//   memoryUsage: 65,
-//   activeUsers: 23
-// };
+// AdminPanel removed — component deleted
 
 const mockRecentJobs = [
   { id: "job_001", name: "Análisis RNA-Seq", status: "running", progress: 75, user: "Dr. García", time: "2h 15m" },
@@ -339,12 +328,7 @@ const Dashboard = () => {
         </Card>
       </div>
 
-      {/* Panel de Administración - Solo visible para admins */}
-      {user?.role === 'admin' && (
-        <div className="mb-8">
-          <AdminPanel />
-        </div>
-      )}
+      {/* AdminPanel removed */}
     </Layout>
   );
 };

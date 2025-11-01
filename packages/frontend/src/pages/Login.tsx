@@ -6,7 +6,8 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
-import { LogIn } from 'lucide-react';
+import { LogIn, Sun, Moon, ArrowLeft } from 'lucide-react';
+import { useTheme } from 'next-themes';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -15,6 +16,7 @@ export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { theme, setTheme } = useTheme();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -49,14 +51,35 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background via-muted/30 to-background p-4">
-      <Card className="w-full max-w-md animate-fade-in-up">
+      <div className="fixed top-4 right-6 z-50">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          className="h-8 w-8 p-0"
+        >
+          <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+          <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+          <span className="sr-only">Cambiar tema</span>
+        </Button>
+      </div>
+      <div className="relative w-full max-w-md">
+        <Button className="absolute left-3 top-3 z-20" variant="ghost" size="sm" asChild>
+          <Link to="/">
+            <ArrowLeft className="h-5 w-5" />
+          </Link>
+        </Button>
+        <Card className="w-full max-w-md animate-fade-in-up">
         <CardHeader className="space-y-1">
+          <div className="flex justify-center mb-2">
+            <img src="/placeholder.png" alt="Atrox" className="h-12 w-12 rounded" />
+          </div>
           <div className="flex items-center gap-2">
             <LogIn className="h-6 w-6 text-primary" />
             <CardTitle className="text-2xl font-bold">Iniciar Sesión</CardTitle>
           </div>
           <CardDescription>
-            Ingresa tus credenciales para acceder a AtroxGetaway
+            Ingresa tus credenciales para acceder a Atrox Gateway
           </CardDescription>
         </CardHeader>
         <form onSubmit={handleSubmit}>
@@ -97,6 +120,7 @@ export default function Login() {
           </CardFooter>
         </form>
       </Card>
+      </div>
     </div>
   );
 }

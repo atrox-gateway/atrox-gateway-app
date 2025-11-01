@@ -144,7 +144,7 @@ adminRouter.get('/registrations', async (req, res) => {
             try {
                 const parsed = JSON.parse(raw);
                 // No devolvemos la contraseña al frontend del admin por seguridad
-                items.push({ username: parsed.username, email: parsed.email, createdAt: parsed.createdAt });
+                items.push({ username: parsed.username, email: parsed.email, justification: parsed.justification || null, createdAt: parsed.createdAt });
             } catch (e) {
                 console.warn('Malformed pending entry for', k);
             }

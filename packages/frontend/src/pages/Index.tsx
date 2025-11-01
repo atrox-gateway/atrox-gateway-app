@@ -2,6 +2,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowRight, Cpu, BarChart, Files, Clock, Users, Shield } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
+import { Sun, Moon } from 'lucide-react';
+import { useTheme } from 'next-themes';
 import { useAuth } from "@/contexts/AuthContext";
 import { useEffect } from "react";
 import heroImage from "@/assets/hero-leoatrox.jpg";
@@ -12,6 +14,7 @@ import iconFiles from "@/assets/icon-files.jpg";
 const Index = () => {
   const { isAuthenticated } = useAuth();
   const navigate = useNavigate();
+  const { theme, setTheme } = useTheme();
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -21,6 +24,19 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Theme toggle (top-right) */}
+      <div className="fixed top-4 right-6 z-50">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          className="h-8 w-8 p-0"
+        >
+          <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+          <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+          <span className="sr-only">Cambiar tema</span>
+        </Button>
+      </div>
       {/* Hero Section */}
       <section className="relative overflow-hidden">
         <div 

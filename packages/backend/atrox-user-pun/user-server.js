@@ -214,6 +214,61 @@ userRouter.get('/dashboard/stats', async (req, res) => {
     }
 });
 
+    // Get job history for the current PUN user
+    async function getUserJobHistory(username, days = 30) {
+        try {
+            const since = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+            // Fields: JobID, JobName, State, Submit, Start, End, Elapsed, AllocCPUS, ReqMem, ExitCode
+            const fields = 'JobID,JobName,State,Submit,Start,End,Elapsed,AllocCPUS,ReqMem,ExitCode';
+            const cmd = `sacct -P -n -u ${username} -S ${since} -o ${fields}`;
+            const out = await executeShellCommand(cmd);
+            const lines = out.trim().split('\n').filter(l => l.length > 0);
+            const jobs = lines.map(line => {
+                const parts = line.split('|');
+                const [rawJobId, jobName, state, submit, start, end, elapsed, allocCpus, reqMem, exitCode] = parts.concat(Array(10).fill(null));
+                const jobId = rawJobId ? rawJobId.split('.')[0] : rawJobId;
+                return {
+                    id: jobId || rawJobId,
+                    name: jobName || null,
+                    status: state ? state.toLowerCase() : null,
+                    submit_time: submit || null,
+                    start_time: start || null,
+                    end_time: end || null,
+                    duration: elapsed || null,
+                    cpus: allocCpus ? parseInt(allocCpus, 10) : null,
+                    memory: reqMem || null,
+                    exit_code: exitCode ? (isNaN(parseInt(exitCode,10)) ? null : parseInt(exitCode,10)) : null,
+                };
+            });
+            // dedupe by id
+            const seen = new Set();
+            const uniq = [];
+            for (const j of jobs) {
+                if (!j.id) continue;
+                if (seen.has(j.id)) continue;
+                seen.add(j.id);
+                uniq.push(j);
+            }
+            return uniq;
+        } catch (e) {
+            console.error('PUN getUserJobHistory error', e);
+            throw e;
+        }
+    }
+
+    userRouter.get('/history', authenticateToken, async (req, res) => {
+        try {
+            const days = parseInt(req.query.days || '30', 10) || 30;
+            const username = req.user && req.user.sub;
+            if (!username) return res.status(400).json({ success:false, message: 'No user in token' });
+            const history = await getUserJobHistory(username, days);
+            return res.json(history);
+        } catch (e) {
+            console.error('PUN /history error', e);
+            return res.status(500).json({ success:false, message: 'Failed to retrieve history', detail: String(e) });
+        }
+    });
+
 // --- RUTAS PARA MANEJO DE ARCHIVOS (CRUD + UPLOAD via JSON base64) ---
 const filesRouter = express.Router();
 
@@ -428,6 +483,30 @@ filesRouter.post('/upload', authenticateToken, async (req, res) => {
         return res.json({ success: true, results });
     } catch (err) {
         console.error('Error in POST /upload:', err.message);
+        return res.status(400).json({ success: false, message: err.message });
+    }
+});
+
+// Create a directory
+filesRouter.post('/folder', authenticateToken, async (req, res) => {
+    const username = req.user.sub;
+    const isAdmin = req.user.role === 'admin';
+    const { path: requestedPath } = req.body || {};
+    if (!requestedPath) return res.status(400).json({ success: false, message: 'path is required' });
+    try {
+        const target = normalizeAndVerifyPath(username, String(requestedPath), isAdmin);
+        // Ensure parent exists and is a directory
+        const parent = path.dirname(target);
+        const parentStats = await fs.promises.stat(parent).catch(() => null);
+        if (!parentStats || !parentStats.isDirectory()) return res.status(400).json({ success: false, message: 'Parent directory does not exist.' });
+
+        const existing = await fs.promises.stat(target).catch(() => null);
+        if (existing) return res.status(409).json({ success: false, message: 'Path already exists.' });
+
+        await fs.promises.mkdir(target, { recursive: false, mode: 0o755 });
+        return res.json({ success: true, message: 'Directory created.', path: target });
+    } catch (err) {
+        console.error('Error in POST /folder:', err.message);
         return res.status(400).json({ success: false, message: err.message });
     }
 });
