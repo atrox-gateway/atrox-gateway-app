@@ -201,7 +201,6 @@ const Jobs = () => {
   };
 
   useEffect(() => {
-                            {memory === '' ? ' No se solicitará memoria explícita (workaround).' : ''}
     fetchJobs();
     fetchPartitions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -258,6 +257,37 @@ const Jobs = () => {
     return btoa(binary);
   };
 
+  // Helper para enviar el trabajo, con opción de omitir memoria (--mem)
+  const postJob = async (omitMem: boolean) => {
+    const body = {
+      name: jobName.trim(),
+      cpus: cpus ? parseInt(cpus, 10) : undefined,
+      memory: omitMem ? undefined : (memory || undefined), // ej: "16G"
+      partition: partition || undefined,
+      account: account || undefined,
+      qos: qos || undefined,
+      walltime: walltime || undefined,
+      scriptBase64,
+      scriptFileName: scriptFileName || undefined,
+    };
+    const res = await fetch("/api/v1/user/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      try {
+        const j = JSON.parse(txt);
+        throw new Error(j?.detail || j?.error || `Error ${res.status}`);
+      } catch (_) {
+        throw new Error(txt || `Error ${res.status}`);
+      }
+    }
+    return res.json();
+  };
+
   const onSubmitJob = async () => {
     if (!jobName.trim()) {
       toast({ title: "Nombre requerido", description: "Asigna un nombre al trabajo.", variant: "destructive" });
@@ -269,33 +299,8 @@ const Jobs = () => {
     }
     setSubmitting(true);
     try {
-      const body = {
-        name: jobName.trim(),
-        cpus: cpus ? parseInt(cpus, 10) : undefined,
-        memory: memory || undefined, // e.g. "16G"
-        partition: partition || undefined,
-        account: account || undefined,
-        qos: qos || undefined,
-        walltime: walltime || undefined,
-        scriptBase64,
-        scriptFileName: scriptFileName || undefined,
-      };
-      const res = await fetch("/api/v1/user/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        try {
-          const j = JSON.parse(txt);
-          throw new Error(j?.detail || j?.error || `Error ${res.status}`);
-        } catch (_) {
-          throw new Error(txt || `Error ${res.status}`);
-        }
-      }
-      const data = await res.json();
+      // Primer intento: con memoria si el usuario la especificó
+      const data = await postJob(false);
       toast({ title: "Trabajo enviado", description: `ID: ${data?.jobId || "desconocido"}` });
       // Reset form minimal
       setJobName("");
@@ -312,7 +317,33 @@ const Jobs = () => {
       await fetchJobs();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      toast({ title: "Error al enviar trabajo", description: msg || "Intente de nuevo.", variant: "destructive" });
+      const looksLikeMemError = /mem|memory|--mem|cannot\s+satisfy|exceed|mem(ory)? per/i.test(msg);
+      const userSpecifiedMem = Boolean(memory);
+      if (looksLikeMemError && userSpecifiedMem) {
+        // Reintentar una sola vez sin --mem
+        try {
+          toast({ title: "Memoria rechazada", description: "Reintentando sin --mem (dejar que Slurm asigne por defecto)..." });
+          const data2 = await postJob(true);
+          toast({ title: "Trabajo enviado", description: `ID: ${data2?.jobId || "desconocido"}` });
+          // Reset form minimal (conserva selección de partición)
+          setJobName("");
+          setCpus("");
+          setMemory("");
+          setWalltime("");
+          setPartition(partition || "");
+          setAccount("");
+          setQos("");
+          setDescription("");
+          setScriptBase64("");
+          setScriptFileName("");
+          await fetchJobs();
+        } catch (e2: unknown) {
+          const m2 = e2 instanceof Error ? e2.message : String(e2);
+          toast({ title: "Error al enviar trabajo", description: m2 || "Intente de nuevo.", variant: "destructive" });
+        }
+      } else {
+        toast({ title: "Error al enviar trabajo", description: msg || "Intente de nuevo.", variant: "destructive" });
+      }
     } finally {
       setSubmitting(false);
     }

@@ -683,24 +683,54 @@ jobsRouter.post('/jobs', authenticateToken, async (req, res) => {
             await fs.promises.writeFile(scriptFile, buffer, { mode: 0o700 });
         }
 
-        // Construir comando sbatch con flags comunes
-        const parts = ['sbatch'];
-        parts.push('--job-name', `'${name.replace(/'/g, "'\\''")}'`);
-        if (cpus) parts.push('--cpus-per-task', String(parseInt(cpus, 10)));
-        if (memory) parts.push('--mem', String(memory)); // ej: 16G
-    if (partition) parts.push('--partition', String(partition));
-    if (account) parts.push('--account', String(account));
-    if (qos) parts.push('--qos', String(qos));
-        if (walltime) parts.push('--time', String(walltime)); // HH:MM:SS o D-HH:MM:SS
-        parts.push('--output', `'${path.join(workdir, '%x-%j.out')}'`);
-        parts.push('--error', `'${path.join(workdir, '%x-%j.err')}'`);
-    parts.push(`'${scriptFile.replace(/'/g, "'\\''")}'`);
+        // Helper: construir comando sbatch con flags comunes; permite omitir --mem si "includeMem" es false
+        const buildCmd = (includeMem = true) => {
+            const p = ['sbatch'];
+            p.push('--job-name', `'${name.replace(/'/g, "'\\''")}'`);
+            if (cpus) p.push('--cpus-per-task', String(parseInt(cpus, 10)));
+            if (includeMem && memory) p.push('--mem', String(memory)); // ej: 16G
+            if (partition) p.push('--partition', String(partition));
+            if (account) p.push('--account', String(account));
+            if (qos) p.push('--qos', String(qos));
+            if (walltime) p.push('--time', String(walltime)); // HH:MM:SS o D-HH:MM:SS
+            p.push('--output', `'${path.join(workdir, '%x-%j.out')}'`);
+            p.push('--error', `'${path.join(workdir, '%x-%j.err')}'`);
+            p.push(`'${scriptFile.replace(/'/g, "'\\''")}'`);
+            return p.join(' ');
+        };
 
-        const cmd = parts.join(' ');
-        const out = await executeShellCommand(cmd);
-        const m = /Submitted batch job (\d+)/.exec(out);
-        const jobId = m && m[1] ? m[1] : null;
-        return res.status(201).json({ jobId, message: out.trim() });
+        const looksLikeMemError = (err) => {
+            const s = (err && (err.stderr || err.message || '')) + '';
+            return /mem|memory|--mem|cannot\s+satisfy|exceed|mem(ory)?\s+per/i.test(s);
+        };
+
+        // Primer intento: con --mem si el usuario lo especificó
+        let cmd = buildCmd(true);
+        try {
+            const out = await executeShellCommand(cmd);
+            const m = /Submitted batch job (\d+)/.exec(out);
+            const jobId = m && m[1] ? m[1] : null;
+            return res.status(201).json({ jobId, message: out.trim() });
+        } catch (e) {
+            // Si falla por motivo de memoria y el usuario pidió memory, reintentar sin --mem
+            if (memory && looksLikeMemError(e)) {
+                try {
+                    const out2 = await executeShellCommand(buildCmd(false));
+                    const m2 = /Submitted batch job (\d+)/.exec(out2);
+                    const jobId2 = m2 && m2[1] ? m2[1] : null;
+                    return res.status(201).json({ jobId: jobId2, message: out2.trim(), fallbackNoMem: true });
+                } catch (e2) {
+                    // Devuelve el detalle de ambos intentos
+                    return res.status(500).json({
+                        error: 'Failed to submit job',
+                        detail: (e2 && (e2.stderr || e2.message)) || String(e2),
+                        firstAttemptDetail: (e && (e.stderr || e.message)) || String(e),
+                    });
+                }
+            }
+            // No fue un error de memoria, o no se había pedido memory: devuelve error original
+            return res.status(500).json({ error: 'Failed to submit job', detail: (e && (e.stderr || e.message)) || String(e) });
+        }
     } catch (e) {
         console.error('Error en POST /api/v1/user/jobs:', e);
         return res.status(500).json({ error: 'Failed to submit job', detail: (e && (e.stderr || e.message)) || String(e) });
