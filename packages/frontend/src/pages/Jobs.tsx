@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import {
   Play,
   Pause,
@@ -20,6 +21,7 @@ import {
 } from "lucide-react";
 import { Layout } from "@/components/Layout";
 import { useToast } from "@/components/ui/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 
 type UiJobStatus = "running" | "queued" | "completed" | "failed" | "unknown";
 
@@ -47,6 +49,10 @@ type PartitionInfo = {
 
 const Jobs = () => {
   const { toast } = useToast();
+  const { user, isAuthenticated } = useAuth();
+  const username = user?.username || "";
+  const USER_HOME_PATH = username ? `/hpc-home/${username}` : "/hpc-home";
+  const [tabValue, setTabValue] = useState<string>("list");
   const [filter, setFilter] = useState<string>("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -64,6 +70,8 @@ const Jobs = () => {
   const [description, setDescription] = useState("");
   const [scriptFileName, setScriptFileName] = useState<string>("");
   const [scriptBase64, setScriptBase64] = useState<string>("");
+  const [scriptSource, setScriptSource] = useState<"local" | "files" | null>(null);
+  const [scriptPath, setScriptPath] = useState<string>("");
   const [submitting, setSubmitting] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -241,6 +249,8 @@ const Jobs = () => {
       const base64 = arrayBufferToBase64(buf);
       setScriptBase64(base64);
       setScriptFileName(file.name);
+      setScriptSource("local");
+      setScriptPath("");
     } catch (e) {
       toast({ title: "Error leyendo archivo", description: "No fue posible leer el script.", variant: "destructive" });
     }
@@ -255,6 +265,67 @@ const Jobs = () => {
       binary += String.fromCharCode.apply(null, Array.from(chunk) as number[]);
     }
     return btoa(binary);
+  };
+
+  // --- File Browser (Mis Archivos) ---
+  type FileItem = { id: string; name: string; type: 'file' | 'folder' };
+  const [fileDialogOpen, setFileDialogOpen] = useState(false);
+  const [fbPath, setFbPath] = useState<string>(USER_HOME_PATH);
+  const [fbFiles, setFbFiles] = useState<FileItem[]>([]);
+  const [fbLoading, setFbLoading] = useState<boolean>(false);
+  const [fbError, setFbError] = useState<string | null>(null);
+
+  const fetchFbFiles = async (path: string) => {
+    setFbLoading(true);
+    setFbError(null);
+    try {
+      const safePath = path && path.startsWith(USER_HOME_PATH) ? path : USER_HOME_PATH;
+      const res = await fetch(`/api/v1/user/files?path=${encodeURIComponent(safePath)}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(`Error ${res.status}`);
+      const data = await res.json();
+      const list: FileItem[] = Array.isArray(data?.files)
+        ? data.files.map((f: any) => ({ id: f.id, name: f.name, type: f.type }))
+        : [];
+      setFbFiles(list);
+      setFbPath(data?.path || safePath);
+    } catch (e: any) {
+      setFbError(e?.message || 'No se pudieron cargar archivos.');
+    } finally {
+      setFbLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (fileDialogOpen && isAuthenticated) {
+      fetchFbFiles(fbPath || USER_HOME_PATH);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileDialogOpen]);
+
+  const goUpPath = (path: string) => {
+    const segs = path.split('/').filter(Boolean);
+    segs.pop();
+    const parent = `/${segs.join('/')}` || '/';
+    // No permitir salir del home del usuario
+    if (!parent.startsWith(USER_HOME_PATH)) return USER_HOME_PATH;
+    return parent;
+  };
+
+  const pickFileFromPath = async (path: string, displayName: string) => {
+    try {
+      const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(path)}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(`Error ${res.status}`);
+      const data = await res.json();
+      if (!data?.success) throw new Error('No se pudo leer el archivo.');
+      setScriptBase64(data.contentBase64);
+      setScriptFileName(displayName);
+      setScriptSource('files');
+      setScriptPath(path);
+      setFileDialogOpen(false);
+      toast({ title: 'Script seleccionado', description: displayName });
+    } catch (e: any) {
+      toast({ title: 'Error', description: e?.message || 'No se pudo abrir el archivo', variant: 'destructive' });
+    }
   };
 
   // Helper para enviar el trabajo, con opción de omitir memoria (--mem)
@@ -288,6 +359,200 @@ const Jobs = () => {
     return res.json();
   };
 
+  // ======= Templates (Plantillas) =======
+  const TEMPLATES_DIR = `${USER_HOME_PATH}/.atrox/job-templates`;
+  const [templates, setTemplates] = useState<Array<{ id: string; name: string }>>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesError, setTemplatesError] = useState<string | null>(null);
+  const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+
+  const utf8ToBase64 = (str: string) => {
+    try { return btoa(unescape(encodeURIComponent(str))); } catch { return btoa(str); }
+  };
+  const base64ToUtf8 = (b64: string) => {
+    try { return decodeURIComponent(escape(atob(b64))); } catch { return atob(b64); }
+  };
+
+  const createFolder = async (p: string) => {
+    const res = await fetch('/api/v1/user/folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ path: p })
+    });
+    // Ignore non-2xx; caller will best-effort
+    return res.ok;
+  };
+
+  const ensureTemplatesDir = async () => {
+    try {
+      // Crear ~/.atrox si no existe y luego ~/.atrox/job-templates
+      const base = `${USER_HOME_PATH}/.atrox`;
+      await createFolder(base);
+      await createFolder(TEMPLATES_DIR);
+    } catch {
+      // no-op
+    }
+  };
+
+  const listTemplates = async () => {
+    setTemplatesLoading(true);
+    setTemplatesError(null);
+    try {
+      await ensureTemplatesDir();
+      const res = await fetch(`/api/v1/user/files?path=${encodeURIComponent(TEMPLATES_DIR)}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(`Error ${res.status}`);
+      const data = await res.json();
+      const files = Array.isArray(data?.files) ? data.files : [];
+      const list = files
+        .filter((f: any) => f.type === 'file' && f.name.endsWith('.json'))
+        .map((f: any) => ({ id: f.id, name: f.name.replace(/\.json$/, '') }));
+      setTemplates(list);
+    } catch (e: any) {
+      setTemplatesError(e?.message || 'No se pudieron cargar las plantillas.');
+    } finally {
+      setTemplatesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tabValue === 'templates' && isAuthenticated) {
+      listTemplates();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabValue]);
+
+  const toSlug = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '') || 'plantilla';
+
+  const buildTemplatePayload = (overrideScriptPath?: string) => ({
+    name: jobName.trim(),
+    cpus,
+    memory,
+    walltime,
+    partition,
+    account,
+    qos,
+    description,
+    script: {
+      source: overrideScriptPath ? 'files' : scriptSource,
+      path: overrideScriptPath || (scriptSource === 'files' ? scriptPath : undefined),
+      fileName: scriptFileName || undefined
+    }
+  });
+
+  const sanitizeFileName = (s: string) => s.replace(/[\s/\\]+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 120) || 'script';
+
+  const saveTemplateScriptIfAny = async (slug: string): Promise<string | undefined> => {
+    try {
+      if (scriptBase64 && scriptFileName) {
+        // Si el script vino de "local", guardamos una copia en la carpeta de plantillas
+        const safeName = `${slug}-${sanitizeFileName(scriptFileName)}`;
+        const targetPath = `${TEMPLATES_DIR}/${safeName}`;
+        const body = { path: targetPath, contentBase64: scriptBase64 };
+        let res = await fetch('/api/v1/user/file', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+          res = await fetch('/api/v1/user/file', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
+          });
+        }
+        if (!res.ok) throw new Error(`Error ${res.status}`);
+        return targetPath;
+      }
+    } catch (e) {
+      // Si falla copiar el script, continuamos con la plantilla sin path
+    }
+    return undefined;
+  };
+
+  const saveTemplate = async () => {
+    const name = templateName.trim();
+    if (!name) return;
+    try {
+      setTemplatesLoading(true);
+      setTemplatesError(null);
+      await ensureTemplatesDir();
+      const slug = toSlug(name);
+      const filePath = `${TEMPLATES_DIR}/${slug}.json`;
+      // Si tenemos un script en memoria, guardamos una copia en la carpeta de plantillas y referenciamos ese path
+      const savedScriptPath = await saveTemplateScriptIfAny(slug);
+      const content = JSON.stringify(buildTemplatePayload(savedScriptPath), null, 2);
+      const body = { path: filePath, contentBase64: utf8ToBase64(content) };
+      // Try create; if exists, overwrite
+      let res = await fetch('/api/v1/user/file', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        // Overwrite
+        res = await fetch('/api/v1/user/file', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
+        });
+      }
+      if (!res.ok) throw new Error(`Error ${res.status}`);
+      toast({ title: 'Plantilla guardada', description: name });
+      setTemplateDialogOpen(false);
+      setTemplateName('');
+      listTemplates();
+    } catch (e: any) {
+      setTemplatesError(e?.message || 'No se pudo guardar la plantilla.');
+      toast({ title: 'Error', description: e?.message || 'No se pudo guardar la plantilla', variant: 'destructive' });
+    } finally {
+      setTemplatesLoading(false);
+    }
+  };
+
+  const loadTemplate = async (fileId: string) => {
+    try {
+      setTemplatesLoading(true);
+      const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(fileId)}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(`Error ${res.status}`);
+      const data = await res.json();
+      const json = JSON.parse(base64ToUtf8(data.contentBase64 || 'e30='));
+      setTabValue('submit');
+      setJobName(json.name || '');
+      setCpus(json.cpus || '');
+      setMemory(json.memory || '');
+      setWalltime(json.walltime || '');
+      setPartition(json.partition || partition);
+      setAccount(json.account || '');
+      setQos(json.qos || '');
+      setDescription(json.description || '');
+      const sc = json.script || {};
+      if (sc.source === 'files' && sc.path) {
+        await pickFileFromPath(sc.path, sc.fileName || sc.path.split('/').pop());
+      } else {
+        // Clear script; templates do not embed local file content
+        setScriptBase64('');
+        setScriptFileName(sc.fileName || '');
+        setScriptSource(sc.source || null);
+        setScriptPath(sc.path || '');
+      }
+      toast({ title: 'Plantilla cargada', description: json.name || '' });
+    } catch (e: any) {
+      toast({ title: 'Error', description: e?.message || 'No se pudo cargar la plantilla', variant: 'destructive' });
+    } finally {
+      setTemplatesLoading(false);
+    }
+  };
+
+  const deleteTemplate = async (fileId: string) => {
+    try {
+      setTemplatesLoading(true);
+      const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(fileId)}`, {
+        method: 'DELETE', credentials: 'include'
+      });
+      if (!res.ok) throw new Error(`Error ${res.status}`);
+      toast({ title: 'Plantilla eliminada' });
+      listTemplates();
+    } catch (e: any) {
+      toast({ title: 'Error', description: e?.message || 'No se pudo eliminar', variant: 'destructive' });
+    } finally {
+      setTemplatesLoading(false);
+    }
+  };
+
   const onSubmitJob = async () => {
     if (!jobName.trim()) {
       toast({ title: "Nombre requerido", description: "Asigna un nombre al trabajo.", variant: "destructive" });
@@ -302,17 +567,19 @@ const Jobs = () => {
       // Primer intento: con memoria si el usuario la especificó
       const data = await postJob(false);
       toast({ title: "Trabajo enviado", description: `ID: ${data?.jobId || "desconocido"}` });
-      // Reset form minimal
+    // Reset form minimal
       setJobName("");
       setCpus("");
       setMemory("");
       setWalltime("");
       setPartition(partition || "");
-  setAccount("");
-  setQos("");
+    setAccount("");
+    setQos("");
       setDescription("");
       setScriptBase64("");
       setScriptFileName("");
+    setScriptSource(null);
+    setScriptPath("");
       // Refresh jobs list
       await fetchJobs();
     } catch (e: unknown) {
@@ -336,6 +603,8 @@ const Jobs = () => {
           setDescription("");
           setScriptBase64("");
           setScriptFileName("");
+          setScriptSource(null);
+          setScriptPath("");
           await fetchJobs();
         } catch (e2: unknown) {
           const m2 = e2 instanceof Error ? e2.message : String(e2);
@@ -374,13 +643,13 @@ const Jobs = () => {
               Administra y monitorea trabajos en LeoAtrox
             </p>
           </div>
-          <Button className="btn-hero">
+          <Button className="btn-hero" onClick={() => setTabValue('submit')}>
             <Plus className="w-4 h-4 mr-2" />
             Nuevo Trabajo
           </Button>
         </div>
 
-        <Tabs defaultValue="list" className="animate-fade-in-up delay-100">
+        <Tabs value={tabValue} onValueChange={setTabValue} className="animate-fade-in-up delay-100">
           <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="list">Lista de Trabajos</TabsTrigger>
             <TabsTrigger value="submit">Enviar Trabajo</TabsTrigger>
@@ -525,7 +794,15 @@ const Jobs = () => {
                         <p className="text-sm text-muted-foreground">
                           Arrastra tu script aquí o haz clic para seleccionar
                         </p>
-                        <div className="text-sm mt-1">{scriptFileName ? `Seleccionado: ${scriptFileName}` : "Ningún archivo seleccionado"}</div>
+                        <div className="text-sm mt-1">
+                          {scriptFileName ? `Seleccionado: ${scriptFileName}` : "Ningún archivo seleccionado"}
+                          {scriptSource === 'files' && scriptPath && (
+                            <div className="text-xs text-muted-foreground">Origen: Mis archivos ({scriptPath})</div>
+                          )}
+                          {scriptSource === 'local' && (
+                            <div className="text-xs text-muted-foreground">Origen: Este equipo</div>
+                          )}
+                        </div>
                         <input
                           type="file"
                           accept=".sh,.py,.r,.bash,.zsh,.txt,.slurm,.sbatch"
@@ -535,6 +812,9 @@ const Jobs = () => {
                         />
                         <Button variant="outline" className="mt-2" onClick={triggerFilePicker}>
                           Seleccionar Archivo
+                        </Button>
+                        <Button variant="outline" className="mt-2 ml-2" onClick={() => setFileDialogOpen(true)}>
+                          Desde mis archivos
                         </Button>
                       </div>
                     </div>
@@ -675,7 +955,7 @@ const Jobs = () => {
                 </div>
 
                 <div className="flex justify-end gap-4">
-                  <Button variant="outline">
+                  <Button variant="outline" onClick={() => setTemplateDialogOpen(true)}>
                     Guardar como Plantilla
                   </Button>
                   <Button className="btn-hero" onClick={onSubmitJob} disabled={submitting || !cpusWithinLimits || (!memWithinLimits && !isSuspiciousMemLimit)}>
@@ -696,19 +976,121 @@ const Jobs = () => {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="text-center py-12">
-                  <p className="text-muted-foreground">
-                    Las plantillas te permitirán reutilizar configuraciones comunes.
-                  </p>
-                  <Button className="mt-4">
-                    Crear Primera Plantilla
-                  </Button>
+                {/* Templates List */}
+                {templatesError && (
+                  <div className="text-sm text-red-500 mb-2">{templatesError}</div>
+                )}
+                <div className="flex justify-between items-center mb-4">
+                  <div className="text-sm text-muted-foreground">Ruta: {TEMPLATES_DIR}</div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={listTemplates} disabled={templatesLoading}>
+                      {templatesLoading ? 'Cargando…' : 'Actualizar'}
+                    </Button>
+                    <Button onClick={() => setTemplateDialogOpen(true)}>Nueva Plantilla</Button>
+                  </div>
                 </div>
+                {templates.length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-muted-foreground">No hay plantillas aún.</p>
+                    <Button className="mt-4" onClick={() => setTemplateDialogOpen(true)}>Crear Primera Plantilla</Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {templates.map((tpl) => (
+                      <div key={tpl.id} className="flex items-center justify-between border rounded-md p-3">
+                        <div className="text-sm">{tpl.name}</div>
+                        <div className="flex gap-2">
+                          <Button size="sm" variant="outline" onClick={() => loadTemplate(tpl.id)}>Usar</Button>
+                          <Button size="sm" variant="outline" onClick={() => deleteTemplate(tpl.id)}>Eliminar</Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* Dialog: Mis Archivos */}
+      <Dialog open={fileDialogOpen} onOpenChange={setFileDialogOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Seleccionar script desde mis archivos</DialogTitle>
+            <DialogDescription>Navega tu home y elige un archivo de script.</DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm text-muted-foreground truncate max-w-[75%]" title={fbPath}>{fbPath}</div>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => fetchFbFiles(USER_HOME_PATH)}>Home</Button>
+              <Button variant="outline" size="sm" onClick={() => fetchFbFiles(goUpPath(fbPath))}>Subir</Button>
+            </div>
+          </div>
+          {fbError && <div className="text-sm text-red-500">{fbError}</div>}
+          <div className="border rounded-md max-h-80 overflow-auto">
+            {fbLoading ? (
+              <div className="p-4 text-sm">Cargando…</div>
+            ) : (
+              <ul>
+                {fbFiles.map(item => {
+                  const joinPath = (base: string, name: string) => (base.endsWith('/') ? `${base}${name}` : `${base}/${name}`);
+                  const fullPath = joinPath(fbPath, item.name);
+                  return (
+                    <li
+                      key={`${fbPath}::${item.name}`}
+                      className="flex items-center justify-between p-2 hover:bg-muted/50 cursor-pointer select-none"
+                      onClick={() => {
+                        if (item.type === 'folder') {
+                          fetchFbFiles(fullPath);
+                        }
+                      }}
+                      onDoubleClick={() => {
+                        if (item.type === 'folder') {
+                          fetchFbFiles(fullPath);
+                        } else {
+                          pickFileFromPath(fullPath, item.name);
+                        }
+                      }}
+                    >
+                      <span className="text-sm">
+                        {item.type === 'folder' ? `📁 ${item.name}` : `📄 ${item.name}`}
+                      </span>
+                      {item.type === 'file' && (
+                        <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); pickFileFromPath(fullPath, item.name); }}>
+                          Elegir
+                        </Button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFileDialogOpen(false)}>Cerrar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog: Guardar Plantilla */}
+      <Dialog open={templateDialogOpen} onOpenChange={setTemplateDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Guardar como plantilla</DialogTitle>
+            <DialogDescription>Asigna un nombre a la plantilla para reutilizar esta configuración.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="tplName">Nombre de la plantilla</Label>
+            <Input id="tplName" placeholder="ej. RNAseq pequeño" value={templateName} onChange={(e) => setTemplateName(e.target.value)} />
+            {templatesError && <div className="text-sm text-red-500">{templatesError}</div>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTemplateDialogOpen(false)}>Cancelar</Button>
+            <Button onClick={saveTemplate} disabled={templatesLoading || !templateName.trim()}>Guardar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Layout>
   );
 };
