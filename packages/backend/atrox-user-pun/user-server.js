@@ -9,7 +9,7 @@ const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 
 const app = express();
-const socketPath = process.argv[2]; 
+const socketPath = process.argv[2];
 const JWT_SECRET = process.env.JWT_SECRET_KEY || 'insecure_default_secret';
 
 const WWW_DATA_GID = 33;
@@ -37,11 +37,11 @@ const touchSocketMiddleware = (req, res, next) => {
     res.on('finish', () => {
         try {
             const now = new Date();
-            fs.utimesSync(socketPath, now, now); 
+            fs.utimesSync(socketPath, now, now);
         } catch (err) {
         }
     });
-    next(); 
+    next();
 };
 app.use(touchSocketMiddleware);
 
@@ -70,8 +70,8 @@ const authenticateToken = (req, res, next) => {
 
 function parseLsOutput(output, currentPath) {
     // Quita la primera línea ('total X')
-    const lines = output.trim().split('\n').slice(1); 
-    
+    const lines = output.trim().split('\n').slice(1);
+
     return lines.map(line => {
         const parts = line.trim().split(/\s+/);
         if (parts.length < 8) return null; // Saltar líneas no válidas
@@ -110,7 +110,12 @@ function executeShellCommand(command) {
         exec(command, (error, stdout, stderr) => {
             if (error) {
                 console.error(`Error ejecutando comando: ${command}\nStderr: ${stderr}`);
-                return reject(new Error(`Comando fallido: ${command}`));
+                const err = new Error(`Comando fallido: ${command}\n${(stderr || '').toString().trim()}`);
+                // Adjuntar info útil para quien consuma el error
+                err.code = error.code;
+                err.stdout = stdout;
+                err.stderr = stderr;
+                return reject(err);
             }
             resolve(stdout);
         });
@@ -162,25 +167,25 @@ async function getUserResourceUsage(username) {
 const userRouter = express.Router();
 
 userRouter.get('/whoami', (req, res) => {
-    res.json({ 
-        username: req.user.sub, 
+    res.json({
+        username: req.user.sub,
         role: req.user.role
     });
 });
 
 userRouter.get('/files', (req, res) => {
-    const username = req.user.sub; 
+    const username = req.user.sub;
     const basePath = `/hpc-home/${username}`;
     const finalPath = req.query.path || basePath;
-    
+
     exec(`ls -l ${finalPath}`, (err, stdout, stderr) => {
         if (err) {
             console.error(`[PUN /api/files] Error:`, stderr);
             return res.status(400).json({ success: false, message: stderr });
         }
-        
-        const fileList = parseLsOutput(stdout, finalPath); 
-        
+
+        const fileList = parseLsOutput(stdout, finalPath);
+
         return res.json({ success: true, path: finalPath, files: fileList });
     });
 });
@@ -528,6 +533,220 @@ app.use('/api/v1/user', filesRouter);
 // mount router with authentication at the new prefix
 app.use('/api/v1/user', authenticateToken, userRouter);
 
+// --- JOBS ROUTER: gestión de trabajos en Slurm ---
+const jobsRouter = express.Router();
+
+// Utilidad: mapear estados de Slurm a estados de UI
+function mapSlurmStateToUi(state) {
+    const s = (state || '').toString().toUpperCase();
+    if (s.startsWith('RUNNING')) return 'running';
+    if (s.startsWith('PENDING') || s.startsWith('CONFIGURING') || s.startsWith('REQUEUED')) return 'queued';
+    if (s.startsWith('COMPLETED')) return 'completed';
+    if (s.startsWith('CANCELLED') || s.startsWith('FAILED') || s.startsWith('TIMEOUT')) return 'failed';
+    return 'unknown';
+}
+
+// GET /api/v1/user/jobs -> lista trabajos en vivo del usuario (squeue)
+jobsRouter.get('/jobs', authenticateToken, async (req, res) => {
+    try {
+        const username = req.user.sub;
+        // Campos: JobID|JobName|State|Elapsed|TimeLimit|CPUs|ReqMem|Start|User
+        const fmt = '%i|%j|%T|%M|%l|%C|%m|%S|%u';
+        const cmd = `squeue -h -u ${username} -o "${fmt}"`;
+        const out = await executeShellCommand(cmd);
+        const lines = out.trim().split('\n').filter(Boolean);
+        const jobs = lines.map(line => {
+            const [id, name, state, elapsed, timelimit, cpus, mem, start, user] = line.split('|');
+            // Estimar progreso sencillo a partir de elapsed/timelimit (cuando ambos están presentes)
+            let progress = 0;
+            const toSecs = (t) => {
+                if (!t || t === 'N/A' || t === '-') return 0;
+                // Slurm puede usar D-HH:MM:SS o HH:MM:SS
+                const dparts = t.split('-');
+                let days = 0, rest = t;
+                if (dparts.length === 2) { days = parseInt(dparts[0], 10) || 0; rest = dparts[1]; }
+                const parts = rest.split(':').map(v => parseInt(v, 10) || 0);
+                while (parts.length < 3) parts.unshift(0);
+                const [hh, mm, ss] = parts;
+                return days * 86400 + hh * 3600 + mm * 60 + ss;
+            };
+            try {
+                const e = toSecs(elapsed);
+                const l = toSecs(timelimit);
+                if (l > 0 && e >= 0) {
+                    progress = Math.max(0, Math.min(100, Math.floor((e / l) * 100)));
+                    if (progress === 100 && !state.toUpperCase().startsWith('COMPLETED')) progress = 99; // evitar 100% si aún no terminó
+                }
+            } catch (_) { /* ignore */ }
+            return {
+                id: id || null,
+                name: name || null,
+                status: mapSlurmStateToUi(state),
+                progress,
+                submitTime: null,
+                startTime: start && start !== 'N/A' ? start : '-',
+                estimatedEnd: '-',
+                cpus: cpus ? parseInt(cpus, 10) : undefined,
+                memory: mem || undefined,
+                user: user || username
+            };
+        });
+        return res.json({ jobs });
+    } catch (e) {
+        console.error('Error en GET /api/v1/user/jobs:', e);
+        return res.status(500).json({ error: 'Failed to list jobs', detail: (e && (e.stderr || e.message)) || String(e) });
+    }
+});
+
+// GET /api/v1/user/jobs/:jobId -> detalle (sacct)
+jobsRouter.get('/jobs/:jobId', authenticateToken, async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const fields = 'JobID,JobName,User,State,Submit,Start,End,Elapsed,Timelimit,ReqCPUS,ReqMem,ExitCode';
+        const cmd = `sacct -P -n -j ${jobId} -o ${fields}`;
+        const out = await executeShellCommand(cmd);
+        const [row] = out.trim().split('\n').filter(Boolean);
+        if (!row) return res.status(404).json({ error: 'Not found' });
+        const [rawId, name, user, state, submit, start, end, elapsed, timelimit, cpus, mem, exitCode] = row.split('|').concat(Array(12).fill(null));
+        const id = (rawId || '').split('.')[0] || rawId;
+        return res.json({
+            id,
+            name: name || null,
+            user: user || null,
+            status: mapSlurmStateToUi(state),
+            submitTime: submit || null,
+            startTime: start || null,
+            endTime: end || null,
+            elapsed: elapsed || null,
+            timelimit: timelimit || null,
+            cpus: cpus ? parseInt(cpus, 10) : null,
+            memory: mem || null,
+            exit_code: exitCode || null
+        });
+    } catch (e) {
+        console.error('Error en GET /api/v1/user/jobs/:jobId:', e);
+        return res.status(500).json({ error: 'Failed to get job', detail: (e && (e.stderr || e.message)) || String(e) });
+    }
+});
+
+// POST /api/v1/user/jobs -> submit (sbatch)
+// body: { name, cpus, memory, partition, walltime, scriptContent, scriptBase64, scriptPath }
+jobsRouter.post('/jobs', authenticateToken, async (req, res) => {
+    try {
+        const username = req.user.sub;
+        const { name, cpus, memory, partition, walltime, account, qos, scriptContent, scriptBase64, scriptPath, scriptFileName } = req.body || {};
+
+        if (!name) return res.status(400).json({ error: 'name is required' });
+        if (!scriptContent && !scriptBase64 && !scriptPath) {
+            return res.status(400).json({ error: 'Provide scriptContent (text) or scriptBase64 or scriptPath' });
+        }
+
+        // Directorio de trabajo en el home del usuario compartido
+        const workdir = path.join('/hpc-home', username, 'jobs');
+        try { await fs.promises.mkdir(workdir, { recursive: true }); } catch (_) {}
+
+        // Crear archivo de script si viene contenido
+        let scriptFile = scriptPath || null;
+        if (!scriptFile) {
+            const safeName = name.toString().replace(/[^a-zA-Z0-9._-]/g, '_');
+            // Detectar extensión a partir del nombre de archivo proporcionado (si existe)
+            const providedExt = (scriptFileName && path.extname(String(scriptFileName)).toLowerCase()) || '';
+            const ext = providedExt || '.sh';
+            scriptFile = path.join(workdir, `${safeName}${ext}`);
+
+            let buffer;
+            if (scriptBase64) {
+                buffer = Buffer.from(String(scriptBase64), 'base64');
+                if (buffer.length > 10 * 1024 * 1024) return res.status(413).json({ error: 'script too large' });
+            } else {
+                const text = String(scriptContent || '');
+                if (text.length > 2 * 1024 * 1024) return res.status(413).json({ error: 'script too large' });
+                buffer = Buffer.from(text, 'utf8');
+            }
+
+            // Asegurar shebang si no existe
+            const hasBom = buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf;
+            const startsAt = hasBom ? 3 : 0;
+            const hasShebang = buffer.length >= startsAt + 2 && buffer[startsAt] === 0x23 /*#*/ && buffer[startsAt + 1] === 0x21 /*!*/;
+
+            if (!hasShebang) {
+                let shebang = '#!/bin/bash\n';
+                const e = ext.toLowerCase();
+                if (e === '.py') shebang = '#!/usr/bin/env python3\n';
+                else if (e === '.r') shebang = '#!/usr/bin/env Rscript\n';
+                else if (e === '.sh' || e === '.bash' || e === '.zsh') shebang = '#!/bin/bash\n';
+
+                const sheb = Buffer.from(shebang, 'utf8');
+                buffer = Buffer.concat([sheb, buffer]);
+            }
+
+            await fs.promises.writeFile(scriptFile, buffer, { mode: 0o700 });
+        }
+
+        // Construir comando sbatch con flags comunes
+        const parts = ['sbatch'];
+        parts.push('--job-name', `'${name.replace(/'/g, "'\\''")}'`);
+        if (cpus) parts.push('--cpus-per-task', String(parseInt(cpus, 10)));
+        if (memory) parts.push('--mem', String(memory)); // ej: 16G
+    if (partition) parts.push('--partition', String(partition));
+    if (account) parts.push('--account', String(account));
+    if (qos) parts.push('--qos', String(qos));
+        if (walltime) parts.push('--time', String(walltime)); // HH:MM:SS o D-HH:MM:SS
+        parts.push('--output', `'${path.join(workdir, '%x-%j.out')}'`);
+        parts.push('--error', `'${path.join(workdir, '%x-%j.err')}'`);
+    parts.push(`'${scriptFile.replace(/'/g, "'\\''")}'`);
+
+        const cmd = parts.join(' ');
+        const out = await executeShellCommand(cmd);
+        const m = /Submitted batch job (\d+)/.exec(out);
+        const jobId = m && m[1] ? m[1] : null;
+        return res.status(201).json({ jobId, message: out.trim() });
+    } catch (e) {
+        console.error('Error en POST /api/v1/user/jobs:', e);
+        return res.status(500).json({ error: 'Failed to submit job', detail: (e && (e.stderr || e.message)) || String(e) });
+    }
+});
+
+// POST /api/v1/user/jobs/:jobId/cancel -> cancelar (scancel)
+jobsRouter.post('/jobs/:jobId/cancel', authenticateToken, async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        if (!jobId) return res.status(400).json({ error: 'jobId required' });
+        const cmd = `scancel ${jobId}`;
+        await executeShellCommand(cmd);
+        return res.json({ ok: true });
+    } catch (e) {
+        console.error('Error en POST /api/v1/user/jobs/:jobId/cancel:', e);
+        return res.status(500).json({ error: 'Failed to cancel job', detail: (e && (e.stderr || e.message)) || String(e) });
+    }
+});
+
+// GET /api/v1/user/partitions -> listar particiones (sinfo)
+jobsRouter.get('/partitions', authenticateToken, async (req, res) => {
+    try {
+        const cmd = 'sinfo -h -o "%P|%a|%m|%D|%c|%G"';
+        const out = await executeShellCommand(cmd);
+        const partitions = out.trim().split('\n').filter(Boolean).map(line => {
+            const [partition, avail, mem, nodes, cpus, gpus] = line.split('|');
+            return {
+                partition: partition || null,
+                avail: avail || null,
+                mem: mem || null,
+                nodes: nodes ? parseInt(nodes, 10) : null,
+                cpus: cpus ? parseInt(cpus, 10) : null,
+                gpus: gpus || null
+            };
+        });
+        return res.json({ partitions });
+    } catch (e) {
+        console.error('Error en GET /api/v1/user/partitions:', e);
+        return res.status(500).json({ error: 'Failed to list partitions', detail: (e && (e.stderr || e.message)) || String(e) });
+    }
+});
+
+// Montar jobsRouter bajo /api/v1/user
+app.use('/api/v1/user', jobsRouter);
+
 app.use((err, req, res, next) => {
     console.error('[PUN ERROR GLOBAL]:', err.stack);
     res.status(500).send('Internal Server Error');
@@ -535,11 +754,11 @@ app.use((err, req, res, next) => {
 
 app.listen(socketPath, () => {
     try {
-        fs.chownSync(socketPath, process.getuid(), WWW_DATA_GID); 
+        fs.chownSync(socketPath, process.getuid(), WWW_DATA_GID);
         fs.chmodSync(socketPath, '660');
         console.log(`✅ PUN initiated and socket permissions set for Nginx: ${socketPath}`);
     } catch (e) {
         console.error("FATAL: Failed to change socket ownership/permissions:", e);
-        cleanupAndExit(); 
+        cleanupAndExit();
     }
 });
