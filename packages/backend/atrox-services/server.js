@@ -299,8 +299,8 @@ async function getSlurmNodeStats() {
             const severity = (st) => {
                 if (!st) return 0;
                 const s = st.toUpperCase();
-                if (['DRAINED','DOWN','ERROR','FAIL','UNKNOWN','DRAIN'].includes(s)) return 4;
-                if (['MAINT','MAINTENANCE'].includes(s)) return 3;
+                if (['DOWN','ERROR','FAIL','UNKNOWN'].includes(s)) return 4;
+                if (['DRAINED','DRAIN'].includes(s)) return 3;
                 if (['ALLOCATED','MIXED','ALLOC'].includes(s)) return 2;
                 // IDLE and others are least severe
                 return 1;
@@ -326,8 +326,8 @@ async function getSlurmNodeStats() {
             let nodesActive = 0, nodesMaintenance = 0, nodesErrors = 0;
             for (const [n, st] of nodeStateMap.entries()) {
                 if (['ALLOCATED', 'MIXED', 'ALLOC'].includes(st)) nodesActive++;
-                else if (['MAINT', 'MAINTENANCE'].includes(st)) nodesMaintenance++;
-                else if (['DRAINED', 'DOWN', 'ERROR', 'FAIL', 'UNKNOWN', 'DRAIN'].includes(st)) nodesErrors++;
+                else if (['DRAIN', 'DRAINED'].includes(st)) nodesMaintenance++;
+                else if (['DOWN', 'ERROR', 'FAIL', 'UNKNOWN'].includes(st)) nodesErrors++;
             }
 
             const nodesTotal = nodeStateMap.size; // distinct nodes
