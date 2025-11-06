@@ -25,8 +25,8 @@ import { useAuth } from "@/contexts/AuthContext";
 
 const mainItems = [
   { title: "Dashboard", url: "/dashboard", icon: BarChart3 },
-  { title: "Trabajos", url: "/jobs", icon: Computer },
   { title: "Archivos", url: "/files", icon: FileStack },
+  { title: "Trabajos", url: "/jobs", icon: Computer },
   { title: "Historial", url: "/history", icon: Clock },
 ];
 

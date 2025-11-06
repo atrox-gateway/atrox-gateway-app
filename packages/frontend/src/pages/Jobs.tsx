@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import {
   Play,
   Pause,
-  Square,
+  XCircle,
   Upload,
   Settings,
   Search,
@@ -708,7 +708,7 @@ const Jobs = () => {
 
         <Tabs value={tabValue} onValueChange={setTabValue} className="animate-fade-in-up delay-100">
           <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="list">Lista de Trabajos</TabsTrigger>
+            <TabsTrigger value="list">Trabajos en Ejecución</TabsTrigger>
             <TabsTrigger value="submit">Enviar Trabajo</TabsTrigger>
             <TabsTrigger value="templates">Plantillas</TabsTrigger>
           </TabsList>
@@ -747,7 +747,7 @@ const Jobs = () => {
                   </Select>
                   <Button variant="outline" onClick={fetchJobs} disabled={loading}>
                     <RefreshCw className="h-4 w-4 mr-2" />
-                    {loading ? "Cargando..." : "Actualizar"}
+                    {loading ? "Actualizando..." : "Actualizar"}
                   </Button>
                 </div>
               </CardContent>
@@ -759,7 +759,7 @@ const Jobs = () => {
                 <div className="text-sm text-red-500">{error}</div>
               )}
               {!error && filteredJobs.length === 0 && (
-                <div className="text-sm text-muted-foreground">{loading ? "Cargando trabajos..." : "No hay trabajos para mostrar."}</div>
+                <div className="text-sm text-muted-foreground">{loading ? "Cargando trabajos..." : "No hay trabajos en ejecución."}</div>
               )}
               {filteredJobs.map((job) => (
                 <Card key={job.id} className="card-professional">
@@ -786,10 +786,16 @@ const Jobs = () => {
                             toast({ title: 'No se pudo cargar el detalle', description: msg || '', variant: 'destructive' });
                           }
                         }}>
-                          <Settings className="h-4 w-4" />
+                          <div className="flex items-center gap-2">
+                            <Settings className="h-4 w-4" />
+                            <span className="text-sm">Detalles</span>
+                          </div>
                         </Button>
-                        <Button variant="outline" size="sm" onClick={() => onClickCancel(job.id)}>
-                          <Square className="h-4 w-4" />
+                        <Button variant="outline" size="sm" onClick={() => onClickCancel(job.id)} title={`Cancelar ${job.id}`} aria-label={`Cancelar trabajo ${job.id}`}>
+                          <div className="flex items-center gap-2">
+                            <XCircle className="h-4 w-4 text-destructive" />
+                            <span className="text-sm text-destructive">Cancelar</span>
+                          </div>
                         </Button>
                       </div>
                     </div>

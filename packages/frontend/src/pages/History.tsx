@@ -15,26 +15,12 @@ import {
   CheckCircle,
   XCircle,
   AlertTriangle
+  ,
+  RefreshCw
 } from "lucide-react";
 import { Layout } from "@/components/Layout";
 import { useAuth } from "@/contexts/AuthContext";
-
-// Types for job items returned by the backend
-// Expected API: GET /api/history?days=30&status_filter=completed
-// Response: Array of objects with at least the following fields:
-// {
-//   id: string,
-//   name: string,
-//   status: 'completed'|'failed'|'cancelled'|string,
-//   submit_time?: string,    // ISO timestamp
-//   duration?: string,
-//   cpus?: number,
-//   memory?: string,
-//   user?: string,
-//   exit_code?: number,
-//   output_size?: string,
-//   error_msg?: string
-// }
+import JobOutputModal from '@/components/JobOutputModal';
 
 type JobItem = {
   id: string;
@@ -52,6 +38,31 @@ type JobItem = {
   error_msg?: string;
 };
 
+type NormalizedStatus = {
+  kind: 'completed'|'failed'|'cancelled'|'running'|'unknown';
+  raw?: string;
+  cancelReason?: string | null;
+};
+
+const normalizeJobStatus = (status: any): NormalizedStatus => {
+  const raw = status == null ? '' : String(status);
+  const s = raw.trim().toLowerCase();
+
+  // try to extract cancel reason like 'cancelled by 1002' -> '1002'
+  let cancelReason: string | null = null;
+  const cancelMatch = raw.match(/cancel(?:led)?(?:\s+by\s+(.+))/i);
+  if (cancelMatch && cancelMatch[1]) {
+    cancelReason = cancelMatch[1].trim();
+  }
+
+  if (s.includes('complete')) return { kind: 'completed', raw, cancelReason };
+  if (s.includes('fail')) return { kind: 'failed', raw, cancelReason };
+  if (s.includes('cancel')) return { kind: 'cancelled', raw, cancelReason };
+  if (s.includes('run')) return { kind: 'running', raw, cancelReason };
+
+  return { kind: 'unknown', raw, cancelReason };
+};
+
 const History = () => {
   const [filter, setFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
@@ -59,6 +70,20 @@ const History = () => {
   const [users, setUsers] = useState<string[]>([]);
   const [selectedUser, setSelectedUser] = useState<string | null>(null);
   const [jobs, setJobs] = useState<JobItem[]>([]);
+  // server-provided aggregated metrics (preferred)
+  type Metrics = {
+    total: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    successRate?: number;
+    cancelledRate?: number;
+    failedRate?: number;
+    averageDurationSeconds?: number | null;
+  };
+  const [serverMetrics, setServerMetrics] = useState<Metrics | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [selectedJobForOutput, setSelectedJobForOutput] = useState<JobItem | null>(null);
   const [loading, setLoading] = useState(false);
   const [pageSize] = useState(5);
   const [offset, setOffset] = useState(0);
@@ -67,26 +92,34 @@ const History = () => {
   const [error, setError] = useState<string | null>(null);
 
   const getStatusBadge = (status: string, exitCode?: number) => {
-    switch (status) {
-      case "completed":
+    const norm = normalizeJobStatus(status);
+    switch (norm.kind) {
+      case 'completed':
         return (
           <Badge className="bg-green-500/10 text-green-600 dark:bg-green-500/20 dark:text-green-400">
             <CheckCircle className="w-3 h-3 mr-1" />
             Completado
           </Badge>
         );
-      case "failed":
+      case 'failed':
         return (
           <Badge className="bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-400">
             <XCircle className="w-3 h-3 mr-1" />
             Error
           </Badge>
         );
-      case "cancelled":
+      case 'cancelled':
         return (
           <Badge className="bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400">
             <AlertTriangle className="w-3 h-3 mr-1" />
             Cancelado
+          </Badge>
+        );
+      case 'running':
+        return (
+          <Badge className="bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">
+            <Clock className="w-3 h-3 mr-1" />
+            Ejecutando
           </Badge>
         );
       default:
@@ -97,13 +130,32 @@ const History = () => {
   // Compute summary metrics from fetched jobs
   const getEfficiencyMetrics = () => {
     const total = jobs.length || 0;
-    const completed = jobs.filter(job => job.status === "completed").length;
-    const failed = jobs.filter(job => job.status === "failed").length;
+    const completed = jobs.filter(job => normalizeJobStatus(job.status).kind === 'completed').length;
+    const failed = jobs.filter(job => normalizeJobStatus(job.status).kind === 'failed').length;
+    const cancelled = jobs.filter(job => normalizeJobStatus(job.status).kind === 'cancelled').length;
     const successRate = total > 0 ? Math.round((completed / total) * 100) : 0;
-    return { completed, failed, total, successRate };
+    const cancelledRate = total > 0 ? Math.round((cancelled / total) * 100) : 0;
+    const failedRate = total > 0 ? Math.round((failed / total) * 100) : 0;
+    return { completed, failed, cancelled, total, successRate, cancelledRate, failedRate };
   };
 
-  const metrics = useMemo(() => getEfficiencyMetrics(), [jobs]);
+  // metrics: prefer server-provided aggregated metrics when available,
+  // otherwise fall back to computing metrics from the currently-loaded jobs.
+  const metrics = useMemo(() => {
+    if (serverMetrics) {
+      return {
+        completed: serverMetrics.completed,
+        failed: serverMetrics.failed,
+        cancelled: serverMetrics.cancelled,
+        total: serverMetrics.total,
+        successRate: serverMetrics.successRate ?? (serverMetrics.total ? Math.round((serverMetrics.completed / serverMetrics.total) * 100) : 0),
+        cancelledRate: serverMetrics.cancelledRate ?? (serverMetrics.total ? Math.round((serverMetrics.cancelled / serverMetrics.total) * 100) : 0),
+        failedRate: serverMetrics.failedRate ?? (serverMetrics.total ? Math.round((serverMetrics.failed / serverMetrics.total) * 100) : 0),
+      };
+    }
+    return getEfficiencyMetrics();
+    // include serverMetrics and jobs so memo updates when either changes
+  }, [serverMetrics, jobs]);
 
   // Helpers to parse and format durations from different possible formats
   const parseDurationToSeconds = (d?: string | null) => {
@@ -194,7 +246,12 @@ const History = () => {
 
   // Average duration (in seconds) over completed jobs with a duration
   const averageDurationSeconds = useMemo(() => {
-    const completedJobs = jobs.filter(j => (j.status || '').toString().toLowerCase() === 'completed');
+    // Prefer server-provided aggregated average if available
+    if (serverMetrics && typeof serverMetrics.averageDurationSeconds === 'number' && serverMetrics.averageDurationSeconds > 0) {
+      return Math.round(serverMetrics.averageDurationSeconds);
+    }
+
+    const completedJobs = jobs.filter(j => normalizeJobStatus(j.status).kind === 'completed');
     const durations = completedJobs.map(j => parseDurationToSeconds(j.duration || j.submit_time || j.end_time || j.end_time)).filter(n => n > 0);
     if (durations.length === 0) return 0;
     const sum = durations.reduce((a, b) => a + b, 0);
@@ -261,11 +318,100 @@ const History = () => {
     }
   };
 
+  // Helper to refresh jobs from the first page
+  const fetchJobs = () => {
+    // Reset state and load first page
+    setJobs([]);
+    setOffset(0);
+    setHasMore(true);
+    // refresh aggregated metrics as well (server-side)
+    setServerMetrics(null);
+    void loadMetrics();
+    void loadPage(0, false);
+  };
+
+  // Load aggregated metrics from the backend (if supported).
+  // This endpoint is optional on the backend; if it's not present we simply keep serverMetrics=null
+  // and fall back to client-side computed metrics.
+  const loadMetrics = async () => {
+    try {
+      const days = dateRangeToDays(dateRange);
+      const params = new URLSearchParams();
+      params.set('days', String(days));
+      if (filter && filter !== 'all') params.set('status_filter', filter);
+      if (selectedUser && selectedUser !== 'all') params.set('user', selectedUser);
+
+      // Primary attempt: /api/v1/jobs/metrics
+      const url = `/api/v1/jobs/metrics?${params.toString()}`;
+      const resp = await fetch(url, { credentials: 'include' });
+      if (!resp.ok) {
+        // backend might not expose a metrics endpoint; fallback to fetching the full history
+        // and compute aggregates client-side (safer than showing only the current page)
+        try {
+          const histUrl = `/api/v1/jobs/history?${params.toString()}`;
+          const r2 = await fetch(histUrl, { credentials: 'include' });
+          if (!r2.ok) {
+            setServerMetrics(null);
+            return;
+          }
+          const d2 = await r2.json();
+          const arr: any[] = Array.isArray(d2) ? d2 : (d2.data || []);
+          // compute metrics from full array
+          const total = arr.length;
+          const completed = arr.filter(j => normalizeJobStatus(j?.status).kind === 'completed').length;
+          const failed = arr.filter(j => normalizeJobStatus(j?.status).kind === 'failed').length;
+          const cancelled = arr.filter(j => normalizeJobStatus(j?.status).kind === 'cancelled').length;
+          // average duration seconds over completed jobs
+          const durations = arr
+            .filter(j => normalizeJobStatus(j?.status).kind === 'completed')
+            .map(j => parseDurationToSeconds(j?.duration || j?.submit_time || j?.end_time))
+            .filter(n => n > 0);
+          const avg = durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null;
+          const mapped2: Metrics = {
+            total,
+            completed,
+            failed,
+            cancelled,
+            successRate: total ? Math.round((completed / total) * 100) : 0,
+            cancelledRate: total ? Math.round((cancelled / total) * 100) : 0,
+            failedRate: total ? Math.round((failed / total) * 100) : 0,
+            averageDurationSeconds: avg,
+          };
+          setServerMetrics(mapped2);
+          return;
+        } catch (e) {
+          setServerMetrics(null);
+          return;
+        }
+      }
+      const data = await resp.json();
+      // Map common field names into our Metrics shape
+      const mapped: Metrics = {
+        total: Number(data.total ?? data.count ?? data.total_jobs ?? 0),
+        completed: Number(data.completed ?? data.success ?? data.completed_jobs ?? 0),
+        failed: Number(data.failed ?? data.error_count ?? data.failed_jobs ?? 0),
+        cancelled: Number(data.cancelled ?? data.cancelled_jobs ?? 0),
+        successRate: data.successRate ?? data.success_rate ?? undefined,
+        cancelledRate: data.cancelledRate ?? data.cancelled_rate ?? undefined,
+        failedRate: data.failedRate ?? data.failed_rate ?? undefined,
+        averageDurationSeconds: data.average_duration_seconds ?? data.avg_duration_seconds ?? data.average_duration ?? null,
+      };
+      setServerMetrics(mapped);
+    } catch (err) {
+      // ignore - keep fallback behavior
+      console.debug('loadMetrics failed', err);
+      setServerMetrics(null);
+    }
+  };
+
   // Reset + load first page when filters change
   useEffect(() => {
     setJobs([]);
     setOffset(0);
     setHasMore(true);
+    // refresh aggregated metrics when filters change
+    setServerMetrics(null);
+    void loadMetrics();
     loadPage(0, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter, dateRange, selectedUser]);
@@ -327,15 +473,22 @@ const History = () => {
     <Layout>
       <div className="space-y-6">
         {/* Header */}
-        <div className="animate-fade-in-up">
-          <h1 className="text-3xl font-bold text-gradient">Historial de Trabajos</h1>
-          <p className="text-muted-foreground mt-2">
-            Seguimiento completo de trabajos ejecutados y análisis de rendimiento
-          </p>
+        <div className="animate-fade-in-up flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-gradient">Historial de Trabajos</h1>
+            <p className="text-muted-foreground mt-2">
+              Seguimiento completo de trabajos ejecutados y análisis de rendimiento
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={fetchJobs} disabled={loading}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              {loading ? "Actualizando..." : "Actualizar"}
+            </Button>
+          </div>
         </div>
 
-        {/* Summary Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 animate-fade-in-up delay-100">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-6 animate-fade-in-up delay-100">
           <Card className="card-professional">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">Total Ejecutados</CardTitle>
@@ -343,9 +496,6 @@ const History = () => {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">{metrics.total}</div>
-              <p className="text-xs text-muted-foreground">
-                Últimos 30 días
-              </p>
             </CardContent>
           </Card>
 
@@ -364,14 +514,23 @@ const History = () => {
 
           <Card className="card-professional">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Cancelados</CardTitle>
+              <CheckCircle className="h-4 w-4 text-warning" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-warning">{metrics.cancelled}</div>
+              <p className="text-xs text-muted-foreground">Tasa de Cancelados: {metrics.cancelledRate}%</p>
+            </CardContent>
+          </Card>
+
+          <Card className="card-professional">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">Con Errores</CardTitle>
               <XCircle className="h-4 w-4 text-destructive" />
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold text-destructive">{metrics.failed}</div>
-              <p className="text-xs text-muted-foreground">
-                Requieren análisis
-              </p>
+              <p className="text-xs text-muted-foreground">Tasa de Errores: {metrics.failedRate}%</p>
             </CardContent>
           </Card>
 
@@ -383,7 +542,7 @@ const History = () => {
             <CardContent>
               <div className="text-2xl font-bold">{averageDurationFormatted}</div>
               <p className="text-xs text-muted-foreground">
-                Basado en {jobs.filter(j => (j.status || '').toString().toLowerCase() === 'completed').length} trabajos completados
+                Basado en {metrics.completed} trabajos completados
               </p>
             </CardContent>
           </Card>
@@ -467,11 +626,8 @@ const History = () => {
                     </CardDescription>
                   </div>
                   <div className="flex gap-2">
-                    <Button variant="outline" size="sm" title="Repetir trabajo">
-                      <RotateCcw className="h-4 w-4" />
-                    </Button>
-                    <Button variant="outline" size="sm" title="Descargar resultados">
-                      <Download className="h-4 w-4" />
+                    <Button variant="outline" size="sm" onClick={() => { setSelectedJobForOutput(job); setModalOpen(true); }} title="Ver salida">
+                      Salida
                     </Button>
                   </div>
                 </div>
@@ -506,7 +662,7 @@ const History = () => {
                   </div>
                 </div>
                 
-                {job.status === "failed" && (job as any).errorMsg && (
+                {normalizeJobStatus(job.status).kind === 'failed' && ((job as any).errorMsg || job.error_msg) && (
                   <div className="mt-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
                     <div className="flex items-center gap-2 text-destructive text-sm">
                       <AlertTriangle className="h-4 w-4" />
@@ -532,6 +688,8 @@ const History = () => {
           </Button>
         </div>
       </div>
+      {/* Modal para ver salida */}
+      <JobOutputModal job={selectedJobForOutput} open={modalOpen} onOpenChange={(v) => { if (!v) setSelectedJobForOutput(null); setModalOpen(v); }} />
     </Layout>
   );
 };

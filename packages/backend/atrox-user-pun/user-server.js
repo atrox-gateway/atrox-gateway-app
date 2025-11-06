@@ -748,8 +748,10 @@ jobsRouter.post('/jobs', authenticateToken, async (req, res) => {
             if (qos) p.push('--qos', String(qos));
             if (walltime) p.push('--time', String(walltime)); // HH:MM:SS o D-HH:MM:SS
             // Guardar archivos de salida y error en la subcarpeta "resultados"
-            p.push('--output', `'${path.join(resultsDir, '%x-%j.out')}'`);
-            p.push('--error', `'${path.join(resultsDir, '%x-%j.err')}'`);
+            // Usar job id (%%j) para generar nombres simples: <jobid>.out / <jobid>.err
+            // Esto facilita búsquedas directas por jobId desde la UI.
+            p.push('--output', `'${path.join(resultsDir, '%j.out')}'`);
+            p.push('--error', `'${path.join(resultsDir, '%j.err')}'`);
             p.push(`'${scriptFile.replace(/'/g, "'\\''")}'`);
             return p.join(' ');
         };

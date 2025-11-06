@@ -10,12 +10,15 @@ import {
   Clock,
   CheckCircle,
   XCircle,
+  AlertTriangle,
   Pause,
   Play,
   MoreHorizontal,
-  Loader2
+  Loader2,
+  RefreshCw
 } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Layout } from "@/components/Layout";
 import { useAuth } from "@/contexts/AuthContext";
@@ -60,10 +63,11 @@ interface NodeInfo {
 }
 
 // Local UI job status type (aligned with Jobs.tsx)
-type UiJobStatus = 'running' | 'queued' | 'completed' | 'failed' | 'unknown';
+type UiJobStatus = 'running' | 'queued' | 'completed' | 'failed' | 'cancelled' | 'unknown';
 
 const Dashboard = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -115,10 +119,12 @@ const Dashboard = () => {
   // Map raw Slurm state to UI categories
   const mapSlurmToUi = (s?: string | null): UiJobStatus => {
     const v = (s || '').toString().toUpperCase();
-    if (v.startsWith('RUNNING')) return 'running';
-    if (v.startsWith('PENDING') || v.startsWith('CONFIGURING') || v.startsWith('REQUEUED')) return 'queued';
-    if (v.startsWith('COMPLETED')) return 'completed';
-    if (v.startsWith('CANCELLED') || v.startsWith('FAILED') || v.startsWith('TIMEOUT')) return 'failed';
+    // use includes to tolerate suffixes like CANCELLED+ or prefixes/suffixes
+    if (v.includes('RUNNING')) return 'running';
+    if (v.includes('PENDING') || v.includes('CONFIGURING') || v.includes('REQUEUED')) return 'queued';
+    if (v.includes('COMPLETED')) return 'completed';
+    if (v.includes('CANCELLED')) return 'cancelled';
+    if (v.includes('FAILED') || v.includes('TIMEOUT')) return 'failed';
     return 'unknown';
   };
 
@@ -210,6 +216,8 @@ const Dashboard = () => {
         return <Badge className="bg-primary text-primary-foreground"><Play className="w-3 h-3 mr-1" />Ejecutando</Badge>;
       case "queued":
         return <Badge variant="secondary"><Pause className="w-3 h-3 mr-1" />En Cola</Badge>;
+      case "cancelled":
+        return <Badge className="bg-amber-500/10 text-amber-600"><AlertTriangle className="w-3 h-3 mr-1" />Cancelado</Badge>;
       case "completed":
         return <Badge className="bg-success text-success-foreground"><CheckCircle className="w-3 h-3 mr-1" />Completado</Badge>;
       case "failed":
@@ -326,8 +334,7 @@ const Dashboard = () => {
           </div>
           <div className="flex items-center gap-2">
             <Button onClick={() => fetchDashboardData({ manual: true })} disabled={isLoading} variant="outline" aria-live="polite" className="flex items-center gap-2">
-              {/* left icon: spinner when loading, otherwise static small loader icon */}
-              <Loader2 className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''} text-muted-foreground`} />
+              <RefreshCw className="h-4 w-4 mr-2" />
               <span>{isLoading ? 'Actualizando...' : 'Actualizar'}</span>
             </Button>
 
@@ -544,7 +551,7 @@ const Dashboard = () => {
                   Últimos trabajos enviados al sistema
                 </CardDescription>
               </div>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" onClick={() => navigate('/history') }>
                 Ver Todos
               </Button>
             </div>
