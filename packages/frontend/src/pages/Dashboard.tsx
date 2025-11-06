@@ -2,14 +2,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { 
-  Activity, 
-  TrendingUp, 
-  Users, 
-  Server, 
-  Clock, 
-  CheckCircle, 
-  XCircle, 
+import {
+  Activity,
+  TrendingUp,
+  Users,
+  Server,
+  Clock,
+  CheckCircle,
+  XCircle,
   Pause,
   Play,
   MoreHorizontal,
@@ -59,12 +59,19 @@ interface NodeInfo {
   reason?: string;
 }
 
+// Local UI job status type (aligned with Jobs.tsx)
+type UiJobStatus = 'running' | 'queued' | 'completed' | 'failed' | 'unknown';
+
 const Dashboard = () => {
   const { user } = useAuth();
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [dataVersion, setDataVersion] = useState<number>(0); // Nuevo estado para forzar re-render de datos
+
+  // Recent Jobs state loaded from real endpoints
+  type RecentJob = { id: string; name: string; status: UiJobStatus; progress: number; user: string; time: string; ts: number };
+  const [recentJobs, setRecentJobs] = useState<RecentJob[]>([]);
 
   const fetchDashboardData = useCallback(async (opts?: { manual?: boolean }) => {
     // If this call was triggered manually by the user, show the button spinner.
@@ -105,6 +112,82 @@ const Dashboard = () => {
     }
   }, []);
 
+  // Map raw Slurm state to UI categories
+  const mapSlurmToUi = (s?: string | null): UiJobStatus => {
+    const v = (s || '').toString().toUpperCase();
+    if (v.startsWith('RUNNING')) return 'running';
+    if (v.startsWith('PENDING') || v.startsWith('CONFIGURING') || v.startsWith('REQUEUED')) return 'queued';
+    if (v.startsWith('COMPLETED')) return 'completed';
+    if (v.startsWith('CANCELLED') || v.startsWith('FAILED') || v.startsWith('TIMEOUT')) return 'failed';
+    return 'unknown';
+  };
+
+  const parseSlurmDate = (s?: string | null): number => {
+    if (!s) return 0;
+    // Accept ISO-like from sacct/squeue when available
+    const t = Date.parse(s);
+    return isNaN(t) ? 0 : t;
+  };
+
+  const fetchRecentJobs = useCallback(async () => {
+    try {
+      // Live jobs (squeue)
+      const liveRes = await fetch('/api/v1/user/jobs', { credentials: 'include' });
+      let live: RecentJob[] = [];
+      if (liveRes.ok) {
+        const body = await liveRes.json().catch(() => ({}));
+        const jobs = Array.isArray(body?.jobs) ? body.jobs : [];
+        live = jobs.map((j: any) => ({
+          id: String(j.id ?? ''),
+          name: String(j.name ?? '—'),
+          status: mapSlurmToUi(j.status),
+          progress: typeof j.progress === 'number' ? j.progress : 0,
+          user: String(j.user ?? ''),
+          time: j.startTime && j.startTime !== '-' ? `Inicio: ${j.startTime}` : 'En ejecución',
+          ts: parseSlurmDate(j.startTime) || Date.now()
+        }));
+      }
+
+      // History (sacct) - latest finished/past jobs
+      const histRes = await fetch('/api/v1/user/history?limit=10', { credentials: 'include' });
+      let hist: RecentJob[] = [];
+      if (histRes.ok) {
+        const arr = await histRes.json().catch(() => []);
+        if (Array.isArray(arr)) {
+          hist = arr.map((h: any) => {
+            const ui = mapSlurmToUi(h.status);
+            const endTs = parseSlurmDate(h.end_time);
+            const startTs = parseSlurmDate(h.start_time);
+            const submitTs = parseSlurmDate(h.submit_time);
+            const ts = endTs || startTs || submitTs || 0;
+            let time = '—';
+            if (ui === 'completed') time = h.end_time ? `Fin: ${h.end_time}` : (h.duration ? `Duración: ${h.duration}` : 'Completado');
+            else if (ui === 'failed') time = h.end_time ? `Fin: ${h.end_time}` : 'Con errores';
+            else time = h.start_time ? `Inicio: ${h.start_time}` : (h.submit_time ? `Submit: ${h.submit_time}` : '—');
+            return {
+              id: String(h.id ?? ''),
+              name: String(h.name ?? '—'),
+              status: ui,
+              progress: ui === 'completed' ? 100 : 0,
+              user: String(h.user ?? ''),
+              time,
+              ts
+            } as RecentJob;
+          });
+        }
+      }
+
+      // Merge live + history, dedupe by id (prefer live), sort by time desc, keep top 5
+      const byId = new Map<string, RecentJob>();
+      for (const j of hist) if (j.id) byId.set(j.id, j);
+      for (const j of live) if (j.id) byId.set(j.id, j); // live overwrites
+      const merged = Array.from(byId.values()).sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 5);
+      setRecentJobs(merged);
+    } catch (e) {
+      // keep existing recentJobs on error
+    }
+  }, []);
+
     // Automatic background polling: run dashboard refresh every 5s in background.
     // We keep this fetch background (manual flag = false) so the header button
     // animation only appears on explicit user clicks.
@@ -113,12 +196,14 @@ const Dashboard = () => {
       // Fetch immediately when the dashboard mounts or when `user` becomes available
       // so the UI doesn't wait for the first 5s interval tick.
       fetchDashboardData({ manual: false });
+      fetchRecentJobs();
       const id = setInterval(() => {
         fetchDashboardData({ manual: false });
+        fetchRecentJobs();
       }, 5000);
       return () => clearInterval(id);
-    }, [user, fetchDashboardData]);
-  
+    }, [user, fetchDashboardData, fetchRecentJobs]);
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case "running":
@@ -228,8 +313,11 @@ const Dashboard = () => {
         {/* Header */}
         <div className="animate-fade-in-up flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold text-gradient flex items-center gap-2">
-              <img src="/placeholder.png" alt="Dashboard Icon" className="h-8 w-8" />
+            <h1 className="text-3xl font-bold text-gradient flex items-center gap-3">
+              {/* Atrox logo (placeholder.png) on brand blue, larger on dashboard */}
+              <span className="h-10 w-10 rounded bg-primary text-primary-foreground inline-flex items-center justify-center">
+                <img src="/placeholder.png" alt="Atrox" className="h-7 w-7" />
+              </span>
               Dashboard de Control
             </h1>
             <p className="text-muted-foreground mt-2">
@@ -463,33 +551,37 @@ const Dashboard = () => {
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              {mockRecentJobs.map((job) => (
-                <div key={job.id} className="flex items-center justify-between p-4 border border-border rounded-lg hover:bg-accent/50 transition-colors">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
-                      <h4 className="font-medium">{job.name}</h4>
-                      {getStatusBadge(job.status)}
-                    </div>
-                    <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                      <span>Usuario: {job.user}</span>
-                      <span>Tiempo: {job.time}</span>
-                      <span>ID: {job.id}</span>
-                    </div>
-                    {job.status === "running" && (
-                      <div className="mt-2">
-                        <div className="flex justify-between text-xs mb-1">
-                          <span>Progreso</span>
-                          <span>{job.progress}%</span>
-                        </div>
-                        <Progress value={job.progress} className="h-1" />
+              {recentJobs.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No hay trabajos recientes.</div>
+              ) : (
+                recentJobs.map((job) => (
+                  <div key={job.id} className="flex items-center justify-between p-4 border border-border rounded-lg hover:bg-accent/50 transition-colors">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-2">
+                        <h4 className="font-medium">{job.name}</h4>
+                        {getStatusBadge(job.status)}
                       </div>
-                    )}
+                      <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                        <span>Usuario: {job.user}</span>
+                        <span>Tiempo: {job.time}</span>
+                        <span>ID: {job.id}</span>
+                      </div>
+                      {job.status === 'running' && (
+                        <div className="mt-2">
+                          <div className="flex justify-between text-xs mb-1">
+                            <span>Progreso</span>
+                            <span>{job.progress}%</span>
+                          </div>
+                          <Progress value={job.progress} className="h-1" />
+                        </div>
+                      )}
+                    </div>
+                    <Button variant="ghost" size="sm">
+                      <MoreHorizontal className="h-4 w-4" />
+                    </Button>
                   </div>
-                  <Button variant="ghost" size="sm">
-                    <MoreHorizontal className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </CardContent>
         </Card>

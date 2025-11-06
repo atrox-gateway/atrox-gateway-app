@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useLocation } from "react-router-dom";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,11 +9,11 @@ import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogFooter, 
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { toast } from "@/components/ui/use-toast";
 import { Textarea } from "@/components/ui/textarea";
-import { 
-  Folder, 
-  File, 
-  Upload, 
-  Download, 
+import {
+  Folder,
+  File,
+  Upload,
+  Download,
   Search,
   MoreHorizontal,
   ArrowLeft,
@@ -26,14 +27,14 @@ import { Layout } from "../components/Layout"; // Corregido: Uso de ruta relativ
 import { useAuth } from "../contexts/AuthContext"; // Corregido: Uso de ruta relativa
 
 interface FileItem {
-  id: string; 
+  id: string;
   name: string;
   type: 'file' | 'folder';
-  size: string; 
+  size: string;
   modified: string;
   extension?: string;
-  owner: string; 
-  group: string; 
+  owner: string;
+  group: string;
   permissions: string;
 }
 
@@ -118,7 +119,7 @@ const getFileIcon = (type: string, extension?: string) => {
 
 const Files = () => {
   const { isAuthenticated, user } = useAuth();
-  
+
   const username = user?.username || 'unknown';
   const USER_HOME_PATH = `/hpc-home/${username}`;
   const isAdmin = user?.role === 'admin';
@@ -147,10 +148,11 @@ const Files = () => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTargetFilePath, setDeleteTargetFilePath] = useState('');
   const [deleteTargetFileName, setDeleteTargetFileName] = useState('');
+  const location = useLocation();
 
   const fetchFiles = useCallback(async (path: string) => {
     if (!isAuthenticated || !user) return;
-    
+
     let validatedPath = path;
 
     if (path === "/"){
@@ -166,7 +168,7 @@ const Files = () => {
     setError(null);
     try {
   const response = await fetch(`/api/v1/user/files?path=${encodeURIComponent(validatedPath)}`);
-      
+
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(errorText || `Error al cargar archivos (Status: ${response.status})`);
@@ -177,15 +179,15 @@ const Files = () => {
          throw new Error("Respuesta inesperada: No es formato JSON.");
       }
 
-      const responseData: FileResponse = await response.json(); 
-      
+      const responseData: FileResponse = await response.json();
+
       if (responseData.success) {
           setFiles(responseData.files);
-          setCurrentPath(responseData.path); 
+          setCurrentPath(responseData.path);
       } else {
           throw new Error(`Fallo del API: ${responseData.path || 'Error desconocido.'}`);
       }
-      
+
     } catch (err: any) {
       setError(err.message || "Fallo la conexión con el servidor.");
       setFiles([]);
@@ -197,11 +199,17 @@ const Files = () => {
   }, [isAuthenticated, user, isAdmin, USER_HOME_PATH]);
 
   useEffect(() => {
-    if (isAuthenticated && user) {
-        fetchFiles(currentPath);
+    if (!isAuthenticated || !user) return;
+    const params = new URLSearchParams(location.search);
+    const p = params.get('path');
+    if (p && typeof p === 'string') {
+      fetchFiles(p);
+    } else {
+      fetchFiles(currentPath);
     }
-  }, [fetchFiles, isAuthenticated, user]);
-  
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchFiles, isAuthenticated, user, location.search]);
+
   const handleNavigation = (name: string, type: 'file' | 'folder') => {
     if (type === 'folder') {
         let newPath = currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`;
@@ -451,12 +459,12 @@ const Files = () => {
       setIsLoading(false);
     }
   }
-  
+
   const handleGoBack = () => {
     const segments = currentPath.split('/').filter(s => s.length > 0);
     segments.pop();
     let parentPath = `/${segments.join('/')}`;
-    
+
     if (parentPath === '' || (parentPath === '/hpc-home' && !isAdmin)) {
          parentPath = USER_HOME_PATH;
     }
@@ -508,17 +516,17 @@ const Files = () => {
             </Button>
           </div>
         </div>
-        
+
         <Card className="card-professional animate-fade-in-up delay-100">
           <CardContent className="p-4">
             <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
               <div className="flex items-center gap-2 flex-1">
-                <Button 
-                    variant="ghost" 
-                    size="sm" 
-                    onClick={handleGoBack} 
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleGoBack}
                     disabled={!isAdmin && currentPath === USER_HOME_PATH}
-                > 
+                >
                   <ArrowLeft className="h-4 w-4" />
                 </Button>
                 <span className="text-sm text-muted-foreground">Ruta:</span>
@@ -622,13 +630,13 @@ const Files = () => {
           </CardHeader>
           <CardContent>
             {error && <div className="text-red-500 font-medium p-4 border border-red-500 bg-red-500/10 rounded-lg">🚨 Error: {error}</div>}
-            
+
             {isLoading && (
                 <div className="flex justify-center p-8">
                     <Loader2 className="h-8 w-8 animate-spin text-primary" />
                 </div>
             )}
-            
+
             {!isLoading && filteredFiles.length === 0 && !error && (
                 <div className="text-center text-muted-foreground p-8">
                     {searchTerm ? `No hay resultados para "${searchTerm}".` : 'Directorio vacío.'}
@@ -645,8 +653,8 @@ const Files = () => {
                     <span className="sr-only">Acciones</span>
                 </div>
                 {filteredFiles.map((item) => (
-                  <div 
-                    key={item.id} 
+                  <div
+                    key={item.id}
                     className="grid grid-cols-[1fr_100px_100px_120px_40px] md:grid-cols-[1fr_100px_100px_120px_40px] gap-4 items-center p-3 border border-border rounded-lg hover:bg-accent/50 transition-colors cursor-pointer"
                     onClick={() => handleNavigation(item.name, item.type)}
                   >
@@ -691,7 +699,7 @@ const Files = () => {
                 ))}
               </div>
             )}
-            
+
       {!isLoading && filteredFiles.length > 0 && viewMode === 'grid' && (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
           {filteredFiles.map((item) => {

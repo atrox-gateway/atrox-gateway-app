@@ -6,11 +6,13 @@ import { Input } from "@/components/ui/input";
 import { useTheme } from "next-themes";
 import { useAuth } from "@/contexts/AuthContext";
 import { useNavigate } from "react-router-dom";
+import { useState } from "react";
 
 export function TopBar() {
   const { theme, setTheme } = useTheme();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [globalQuery, setGlobalQuery] = useState("");
 
   const handleLogout = () => {
     logout();
@@ -21,20 +23,31 @@ export function TopBar() {
     <header className="h-16 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-6 flex items-center justify-between sticky top-0 z-50">
       <div className="flex items-center gap-4">
         <SidebarTrigger className="h-8 w-8" />
-  {/* Logo / icon placed in header - uses files from public/ (can be replaced) */}
-  <img src="/favicon-32x32.png" alt="Atrox logo" className="h-8 w-8 rounded" />
-        <div className="relative hidden md:block">
+  {/* Atrox logo (placeholder.png) on brand blue background */}
+  <div className="h-8 w-8 rounded bg-primary text-primary-foreground flex items-center justify-center">
+    <img src="/placeholder.png" alt="Atrox logo" className="h-5 w-5" />
+  </div>
+        <div className="relative hidden md:block" onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            const q = globalQuery.trim();
+            if (q.length > 0) {
+              navigate(`/search?q=${encodeURIComponent(q)}`);
+            }
+          }
+        }}>
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input 
-            placeholder="Buscar trabajos, archivos..." 
+          <Input
+            placeholder="Buscar trabajos, archivos..."
             className="pl-10 w-64"
+            value={globalQuery}
+            onChange={(e) => setGlobalQuery(e.target.value)}
           />
         </div>
       </div>
 
       <div className="flex items-center gap-4">
-        <Button 
-          variant="ghost" 
+        <Button
+          variant="ghost"
           size="sm"
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
           className="h-8 w-8 p-0"

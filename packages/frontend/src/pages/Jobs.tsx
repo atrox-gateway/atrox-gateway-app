@@ -374,6 +374,16 @@ const Jobs = () => {
     try { return decodeURIComponent(escape(atob(b64))); } catch { return atob(b64); }
   };
 
+  // IDs que vienen del backend en listados de archivos son base64(path absoluto)
+  const decodePathId = (idOrPath: string): string => {
+    try {
+      const decoded = base64ToUtf8(idOrPath);
+      return decoded.startsWith('/') ? decoded : idOrPath;
+    } catch {
+      return idOrPath;
+    }
+  };
+
   const createFolder = async (p: string) => {
     const res = await fetch('/api/v1/user/folder', {
       method: 'POST',
@@ -446,19 +456,37 @@ const Jobs = () => {
   const saveTemplateScriptIfAny = async (slug: string): Promise<string | undefined> => {
     try {
       if (scriptBase64 && scriptFileName) {
-        // Si el script vino de "local", guardamos una copia en la carpeta de plantillas
+        // Guardar una copia del script en la carpeta de jobs del usuario para que exista incluso sin ejecutar
         const safeName = `${slug}-${sanitizeFileName(scriptFileName)}`;
-        const targetPath = `${TEMPLATES_DIR}/${safeName}`;
-        const body = { path: targetPath, contentBase64: scriptBase64 };
+        const jobsDir = `${USER_HOME_PATH}/jobs`;
+        await createFolder(jobsDir);
+        let targetPath = `${jobsDir}/${safeName}`;
+        let body = { path: targetPath, contentBase64: scriptBase64 };
         let res = await fetch('/api/v1/user/file', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
         });
         if (!res.ok) {
+          // Overwrite si ya existe
           res = await fetch('/api/v1/user/file', {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
           });
         }
-        if (!res.ok) throw new Error(`Error ${res.status}`);
+
+        // Si por alguna razón no se pudo escribir en jobs, intentar en la carpeta de plantillas
+        if (!res.ok) {
+          await ensureTemplatesDir();
+          targetPath = `${TEMPLATES_DIR}/${safeName}`;
+          body = { path: targetPath, contentBase64: scriptBase64 };
+          let res2 = await fetch('/api/v1/user/file', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
+          });
+          if (!res2.ok) {
+            res2 = await fetch('/api/v1/user/file', {
+              method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
+            });
+          }
+          if (!res2.ok) throw new Error(`Error ${res2.status}`);
+        }
         return targetPath;
       }
     } catch (e) {
@@ -506,28 +534,56 @@ const Jobs = () => {
   const loadTemplate = async (fileId: string) => {
     try {
       setTemplatesLoading(true);
-      const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(fileId)}`, { credentials: 'include' });
+      const pathParam = decodePathId(fileId);
+      const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(pathParam)}`, { credentials: 'include' });
       if (!res.ok) throw new Error(`Error ${res.status}`);
       const data = await res.json();
       const json = JSON.parse(base64ToUtf8(data.contentBase64 || 'e30='));
       setTabValue('submit');
       setJobName(json.name || '');
-      setCpus(json.cpus || '');
-      setMemory(json.memory || '');
-      setWalltime(json.walltime || '');
-      setPartition(json.partition || partition);
-      setAccount(json.account || '');
-      setQos(json.qos || '');
+      setCpus(json.cpus != null ? String(json.cpus) : '');
+      setMemory(json.memory != null ? String(json.memory) : '');
+      setWalltime(json.walltime != null ? String(json.walltime) : '');
+      setPartition(json.partition != null && String(json.partition) ? String(json.partition) : partition);
+      setAccount(json.account != null ? String(json.account) : '');
+      setQos(json.qos != null ? String(json.qos) : '');
       setDescription(json.description || '');
       const sc = json.script || {};
+      // Helper para intentar cargar un script desde un path dado
+      const tryPick = async (p?: string, displayName?: string) => {
+        if (!p) return false;
+        try {
+          const check = await fetch(`/api/v1/user/file?path=${encodeURIComponent(p)}`, { credentials: 'include' });
+          if (!check.ok) return false;
+          const name = displayName || p.split('/').pop() || 'script';
+          // Reutiliza pickFileFromPath para setear correctamente todos los estados
+          await pickFileFromPath(p, name);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      let scriptLoaded = false;
+      // 1) Caso ideal: ya viene path de archivos
       if (sc.source === 'files' && sc.path) {
-        await pickFileFromPath(sc.path, sc.fileName || sc.path.split('/').pop());
-      } else {
-        // Clear script; templates do not embed local file content
+        scriptLoaded = await tryPick(sc.path, sc.fileName);
+      }
+      // 2) Compat: si no hay path pero hay fileName, intenta buscar copia guardada por nombre
+      if (!scriptLoaded && sc.fileName) {
+        const slug = toSlug(json.name || 'plantilla');
+        const candidate1 = `${TEMPLATES_DIR}/${slug}-${sanitizeFileName(sc.fileName)}`;
+        const candidate2 = `${TEMPLATES_DIR}/${sanitizeFileName(sc.fileName)}`;
+        scriptLoaded = await tryPick(candidate1, sc.fileName) || await tryPick(candidate2, sc.fileName);
+      }
+
+      if (!scriptLoaded) {
+        // No se pudo resolver un script automáticamente: limpiar y avisar
         setScriptBase64('');
         setScriptFileName(sc.fileName || '');
-        setScriptSource(sc.source || null);
-        setScriptPath(sc.path || '');
+        setScriptSource(null);
+        setScriptPath('');
+        toast({ title: 'Plantilla cargada parcialmente', description: 'Seleccione el script manualmente (no se encontró el archivo guardado).', variant: 'destructive' });
       }
       toast({ title: 'Plantilla cargada', description: json.name || '' });
     } catch (e: any) {
@@ -540,7 +596,8 @@ const Jobs = () => {
   const deleteTemplate = async (fileId: string) => {
     try {
       setTemplatesLoading(true);
-      const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(fileId)}`, {
+      const pathParam = decodePathId(fileId);
+      const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(pathParam)}`, {
         method: 'DELETE', credentials: 'include'
       });
       if (!res.ok) throw new Error(`Error ${res.status}`);
@@ -986,13 +1043,11 @@ const Jobs = () => {
                     <Button variant="outline" onClick={listTemplates} disabled={templatesLoading}>
                       {templatesLoading ? 'Cargando…' : 'Actualizar'}
                     </Button>
-                    <Button onClick={() => setTemplateDialogOpen(true)}>Nueva Plantilla</Button>
                   </div>
                 </div>
                 {templates.length === 0 ? (
                   <div className="text-center py-12">
-                    <p className="text-muted-foreground">No hay plantillas aún.</p>
-                    <Button className="mt-4" onClick={() => setTemplateDialogOpen(true)}>Crear Primera Plantilla</Button>
+                    <p className="text-muted-foreground">No hay plantillas disponibles.</p>
                   </div>
                 ) : (
                   <div className="space-y-2">

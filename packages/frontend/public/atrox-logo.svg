@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="256" height="256" fill="none"/>
+  <!-- Simple stylized A (white) designed to be placed over dark background -->
+  <g fill="#FFFFFF">
+    <path d="M128 24 L212 232 H184 L162 176 H94 L72 232 H44 L128 24 Z M152 152 L128 90 L104 152 H152 Z"/>
+  </g>
+  <!-- Optional subtle accent -->
+  <circle cx="196" cy="60" r="6" fill="#FFFFFF" opacity="0.85"/>
+</svg>

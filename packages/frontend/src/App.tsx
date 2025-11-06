@@ -13,6 +13,7 @@ const Dashboard = React.lazy(() => import('./pages/Dashboard'));
 const Jobs = React.lazy(() => import('./pages/Jobs'));
 const Files = React.lazy(() => import('./pages/Files'));
 const History = React.lazy(() => import('./pages/History'));
+const SearchPage = React.lazy(() => import('./pages/Search'));
 const NotFound = React.lazy(() => import('./pages/NotFound'));
 const UserManagement = React.lazy(() => import('./pages/UserManagement'));
 
@@ -33,6 +34,7 @@ const App = () => (
               <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
               <Route path="/jobs" element={<ProtectedRoute><Jobs /></ProtectedRoute>} />
               <Route path="/files" element={<ProtectedRoute><Files /></ProtectedRoute>} />
+              <Route path="/search" element={<ProtectedRoute><SearchPage /></ProtectedRoute>} />
               <Route path="/history" element={<ProtectedRoute><History /></ProtectedRoute>} />
               <Route path="/admin/users" element={<ProtectedRoute requiredRole="admin"><UserManagement /></ProtectedRoute>} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
