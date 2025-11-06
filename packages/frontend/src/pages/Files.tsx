@@ -21,7 +21,9 @@ import {
   List,
   Loader2,
   Edit3,
-  Trash
+  Trash,
+  Eye,
+  EyeOff
 } from "lucide-react";
 import { Layout } from "../components/Layout"; // Corregido: Uso de ruta relativa
 import { useAuth } from "../contexts/AuthContext"; // Corregido: Uso de ruta relativa
@@ -128,6 +130,8 @@ const Files = () => {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [currentPath, setCurrentPath] = useState(USER_HOME_PATH);
   const [searchTerm, setSearchTerm] = useState('');
+  // By default hidden files (starting with '.') are hidden. Toggle to show them.
+  const [showHidden, setShowHidden] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -211,13 +215,11 @@ const Files = () => {
   }, [fetchFiles, isAuthenticated, user, location.search]);
 
   const handleNavigation = (name: string, type: 'file' | 'folder') => {
+    // Only navigate into folders when clicking the row.
+    // Editing files must be done through the action menu (Editar) to avoid accidental edits.
     if (type === 'folder') {
-        let newPath = currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`;
-        fetchFiles(newPath);
-    } else {
-        // Open file for viewing/editing
-        const filePath = currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`;
-        openFileForEdit(filePath, name);
+      const newPath = currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`;
+      fetchFiles(newPath);
     }
   };
 
@@ -478,7 +480,11 @@ const Files = () => {
   }
 
   const filteredFiles = files
-    .filter(item => item.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    .filter(item => {
+      // Hide dot-files by default unless showHidden is true
+      if (!showHidden && item.name.startsWith('.')) return false;
+      return item.name.toLowerCase().includes(searchTerm.toLowerCase());
+    })
     .sort((a, b) => {
       // Desired order: hidden files (name starts with '.' and is a file) -> folders -> regular files
       const aHiddenFile = a.name.startsWith('.') && a.type === 'file' ? 0 : 1;
@@ -545,6 +551,17 @@ const Files = () => {
                         onChange={(e) => setSearchTerm(e.target.value)}
                     />
                 </div>
+                  {/* Toggle mostrar/ocultar archivos ocultos */}
+                  <Button
+                    variant={showHidden ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setShowHidden(s => !s)}
+                    className="ml-2 hidden sm:inline flex items-center"
+                    aria-pressed={showHidden}
+                  >
+                    {showHidden ? <EyeOff className="w-4 h-4 mr-2" /> : <Eye className="w-4 h-4 mr-2" />}
+                    {showHidden ? 'Ocultar ocultos' : 'Mostrar ocultos'}
+                  </Button>
                 <Button variant="outline" size="icon" onClick={() => setViewMode('list')} disabled={viewMode === 'list'}>
                     <List className="h-4 w-4" />
                 </Button>

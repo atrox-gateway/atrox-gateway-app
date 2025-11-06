@@ -1,7 +1,8 @@
 // /opt/atrox-gateway/packages/backend/atrox-services/server.js
 
 const express = require('express');
-const { exec, spawn } = require('child_process'); // Importar spawn
+const { exec } = require('child_process');
+const spawn = require('child_process').spawn;
 const pam = require('authenticate-pam');
 const fs = require('fs');
 const path = require('path');
@@ -9,6 +10,10 @@ const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 
 const sharedLibsPath = path.join(__dirname, '..', 'shared-libraries');
+const { spawnWithTimeout } = require(path.join(sharedLibsPath, 'processUtils.js'));
+const cryptoUtils = require(path.join(sharedLibsPath, 'cryptoUtils.js'));
+const cache = require(path.join(sharedLibsPath, 'cache.js'));
+const logger = require(path.join(sharedLibsPath, 'logger.js'));
 
 const { PunManager } = require(path.join(sharedLibsPath, 'punManager.js'));
 const RedisClient = require(path.join(sharedLibsPath, 'redisClient.js'));
@@ -22,13 +27,44 @@ const app = express();
 app.use(express.json({ limit: '250mb' }));
 app.use(cookieParser());
 
+// Middleware: normalizar respuestas JSON en un único formato
+app.use((req, res, next) => {
+    const originalJson = res.json.bind(res);
+    res.json = (body) => {
+        try {
+            const status = res.statusCode || 200;
+            // Si ya viene con la forma normalizada, no hacer wrapping
+            if (body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'success')) {
+                return originalJson(body);
+            }
+            if (status >= 400) {
+                const message = (body && (body.message || body.error)) || 'Error';
+                const payload = { success: false, message };
+                if (body && typeof body === 'object') payload.detail = body;
+                return originalJson(payload);
+            }
+            // Normal response
+            const payload = { success: true, data: body, message: null };
+            return originalJson(payload);
+        } catch (e) {
+            // In case wrapping fails, fall back to original
+            return originalJson(body);
+        }
+    };
+    next();
+});
+
 const JWT_SECRET = process.env.JWT_SECRET_KEY || 'insecure_default_secret';
 const LISTEN_PORT = process.env.PORT || 3000;
 const MANAGE_USER_SCRIPT_PATH = path.join(__dirname, '..', '..', '..', 'scripts', 'manage_user.sh');
+// Script that updates NGINX upstreams and user map atomically
+const UPDATE_NGINX_SCRIPT_PATH = path.join(__dirname, '..', '..', '..', 'scripts', 'update_nginx_config.sh');
 
 const punManager = new PunManager(punDir, JWT_SECRET, RedisClient);
 punManager.recoverState().then(() => {
-    console.log('✅ Recuperación de estado completada. Portero listo para aceptar logins.');
+    logger.info('Recuperación de estado completada. Portero listo para aceptar logins.');
+}).catch(err => {
+    logger.error('Error recuperando estado de PunManager', err);
 });
 
 const http = require('http');
@@ -94,122 +130,139 @@ function getAdminLevelFromSlurm(username) {
 }
 
 // Ejecuta un comando de shell y devuelve su salida como una promesa
-function executeShellCommand(command, useSudo = false) {
-    return new Promise((resolve, reject) => {
-        const fullCommand = useSudo ? `sudo ${command}` : command;
-        exec(fullCommand, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`Error ejecutando comando: ${fullCommand}\nStderr: ${stderr}`);
-                return reject(new Error(`Comando fallido: ${fullCommand}`));
-            }
-            resolve(stdout);
-        });
+function executeShellCommand(command, useSudo = false, timeoutMs = 30000) {
+    // Avoid running bash as a login shell (-l) because some environments print banners
+    // or welcome messages on login shells which pollute stdout and break parsing of
+    // tools like sinfo/squeue/free/df. Use plain '-c' so we only execute the command.
+    const runner = useSudo ? ['sudo', 'bash', '-c', command] : ['bash', '-c', command];
+    const cmd = runner[0];
+    const args = runner.slice(1);
+    return spawnWithTimeout(cmd, args, { timeoutMs }).then(r => r.stdout).catch(err => {
+        logger.error('executeShellCommand failed', { command, err: err.message });
+        throw err;
     });
 }
 
 // Estadísticas globales: trabajos
 async function getSlurmJobStats(username = null) {
-    try {
-        const output = await executeShellCommand('squeue -h -o "%T %u"');
-        const lines = output.trim().split('\n').filter(l => l.length > 0);
-        let totalJobs = lines.length;
-        let runningJobs = 0;
-        let queuedJobs = 0;
-        let completedToday = 0;
-        const activeUsers = new Set();
+    const key = `slurmJobStats:${username || 'all'}`;
+    return cache.getOrSet(key, 5000, async () => {
+        try {
+            const output = await executeShellCommand('squeue -h -o "%T %u"');
+            const lines = (output || '').trim().split('\n').filter(l => l.length > 0);
+            let totalJobs = 0;
+            let runningJobs = 0;
+            let queuedJobs = 0;
+            let completedToday = 0;
+            const activeUsers = new Set();
+            lines.forEach(line => {
+                // split by whitespace: first token is state, rest is user
+                const parts = line.trim().split(/\s+/);
+                if (parts.length < 2) return; // ignore banner/garbage lines
+                const stateRaw = (parts[0] || '').toString();
+                const user = parts.slice(1).join(' ');
+                // Normalize state: remove non-alpha chars and uppercase (handles RUNNING+, COMPLETED+, etc.)
+                const state = stateRaw.toUpperCase().replace(/[^A-Z]/g, '');
 
-        lines.forEach(line => {
-            const [state, user] = line.split(' ');
-            activeUsers.add(user);
-            if (state === 'RUNNING') runningJobs++;
-            else if (['PENDING','CONFIGURING','REQUEUED'].includes(state)) queuedJobs++;
-        });
+                // Consider this line a valid job only if the state contains a known Slurm state token
+                const knownStates = ['RUNNING','PENDING','CONFIGURING','REQUEUED','COMPLETED','CANCELLED','FAILED','TIMEOUT','SUSPENDED','COMPLETING','CONFIGURED'];
+                if (!state || !knownStates.some(s => state.includes(s))) return;
 
-        // Obtener trabajos completados hoy usando sacct (para todos los usuarios)
-        const today = new Date().toISOString().split('T')[0]; // Formato YYYY-MM-DD
-        // El comando sacct ahora no filtra por usuario para 'completedToday'
-        const sacctCommand = `sacct -S ${today} -o State --noheader | grep -c COMPLETED`;
-
-        const completedOutput = await executeShellCommand(sacctCommand, true); // Ejecutar sacct con sudo
-        completedToday = parseInt(completedOutput.trim()) || 0;
-
-        return { totalJobs, runningJobs, queuedJobs, completedToday, activeUsers: activeUsers.size };
-    } catch (e) {
-        console.error('getSlurmJobStats error', e);
-        return { totalJobs:0, runningJobs:0, queuedJobs:0, completedToday:0, activeUsers:0 };
-    }
+                // It's a valid job line
+                totalJobs++;
+                if (user) activeUsers.add(user);
+                if (state.includes('RUNNING')) runningJobs++;
+                else if (['PENDING','CONFIGURING','REQUEUED'].some(s => state.includes(s))) queuedJobs++;
+            });
+            const today = new Date().toISOString().split('T')[0];
+            const sacctKey = `sacct_completed_count:${today}`;
+            // Cache sacct completed count for 5 seconds to avoid hammering accounting
+            const completedOutput = await cache.getOrSet(sacctKey, 5000, async () => {
+                const sacctCommand = `sacct -S ${today} -o State --noheader | grep -c COMPLETED`;
+                return await executeShellCommand(sacctCommand, true);
+            });
+            completedToday = parseInt((completedOutput || '').trim()) || 0;
+            return { totalJobs, runningJobs, queuedJobs, completedToday, activeUsers: activeUsers.size };
+        } catch (e) {
+            logger.error('getSlurmJobStats error', e);
+            return { totalJobs:0, runningJobs:0, queuedJobs:0, completedToday:0, activeUsers:0 };
+        }
+    });
 }
 
 // Obtener historial de trabajos usando sacct
 async function getJobHistory(username = null, days = 30) {
-    try {
-        const since = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
-        // Usar salida 'pipe' para parseo más sencillo, sin cabecera (-n)
-        // Campos: JobID|JobName|State|Submit|Start|End|Elapsed|AllocCPUS|ReqMem|ExitCode
-        const fields = 'JobID,JobName,State,Submit,Start,End,Elapsed,AllocCPUS,ReqMem,ExitCode,User';
-        const userFilter = username ? `-u ${username}` : '';
-        const cmd = `sacct -P -n ${userFilter} -S ${since} -o ${fields}`;
-        const out = await executeShellCommand(cmd, true);
-        const lines = out.trim().split('\n').filter(l => l.length > 0);
-        const jobs = lines.map(line => {
-            const parts = line.split('|');
-            // Ensure expected length
-            const [rawJobId, jobName, state, submit, start, end, elapsed, allocCpus, reqMem, exitCode, user] = parts.concat(Array(11).fill(null));
-            const jobId = rawJobId ? rawJobId.split('.')[0] : rawJobId; // strip step suffix
-            return {
-                id: jobId || rawJobId,
-                name: jobName || null,
-                status: state ? state.toLowerCase() : null,
-                submit_time: submit || null,
-                start_time: start || null,
-                end_time: end || null,
-                duration: elapsed || null,
-                cpus: allocCpus ? parseInt(allocCpus, 10) : null,
-                memory: reqMem || null,
-                exit_code: exitCode ? (isNaN(parseInt(exitCode,10)) ? null : parseInt(exitCode,10)) : null,
-                user: user || null
-            };
-        });
-        // Deduplicate by id (keep first occurrence)
-        const seen = new Set();
-        const uniq = [];
-        for (const j of jobs) {
-            if (!j.id) continue;
-            if (seen.has(j.id)) continue;
-            seen.add(j.id);
-            uniq.push(j);
+    const key = `jobHistory:${username || 'all'}:${days}`;
+    // sacct queries can be expensive; cache sacct job history for a short window (5s)
+    return cache.getOrSet(key, 5000, async () => {
+        try {
+            const since = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+            const fields = 'JobID,JobName,State,Submit,Start,End,Elapsed,AllocCPUS,ReqMem,ExitCode,User';
+            const userFilter = username ? `-u ${username}` : '';
+            const cmd = `sacct -P -n ${userFilter} -S ${since} -o ${fields}`;
+            const out = await executeShellCommand(cmd, true);
+            const lines = (out || '').trim().split('\n').filter(l => l.length > 0);
+            const jobs = lines.map(line => {
+                const parts = line.split('|');
+                const [rawJobId, jobName, state, submit, start, end, elapsed, allocCpus, reqMem, exitCode, user] = parts.concat(Array(11).fill(null));
+                const jobId = rawJobId ? rawJobId.split('.')[0] : rawJobId;
+                return {
+                    id: jobId || rawJobId,
+                    name: jobName || null,
+                    status: state ? state.toLowerCase() : null,
+                    submit_time: submit || null,
+                    start_time: start || null,
+                    end_time: end || null,
+                    duration: elapsed || null,
+                    cpus: allocCpus ? parseInt(allocCpus, 10) : null,
+                    memory: reqMem || null,
+                    exit_code: exitCode ? (isNaN(parseInt(exitCode,10)) ? null : parseInt(exitCode,10)) : null,
+                    user: user || null
+                };
+            });
+            const seen = new Set();
+            const uniq = [];
+            for (const j of jobs) {
+                if (!j.id) continue;
+                if (seen.has(j.id)) continue;
+                seen.add(j.id);
+                uniq.push(j);
+            }
+            return uniq;
+        } catch (e) {
+            logger.error('getJobHistory error', e);
+            throw e;
         }
-        return uniq;
-    } catch (e) {
-        console.error('getJobHistory error', e);
-        throw e;
-    }
+    });
 }
 
 // Estadísticas globales: recursos del sistema
 async function getSystemResourceUsage() {
     try {
         const memOutput = await executeShellCommand('free -m');
-        const memLines = memOutput.split('\n');
-        const memParts = memLines[1].split(/\s+/);
-        const memTotal = parseInt(memParts[1]);
-        const memUsed = parseInt(memParts[2]);
+        const memLines = (memOutput || '').split('\n');
+        const memParts = memLines[1] ? memLines[1].split(/\s+/) : [];
+        const memTotal = parseInt(memParts[1] || '0');
+        const memUsed = parseInt(memParts[2] || '0');
         const memoryUsage = memTotal > 0 ? Math.floor((memUsed / memTotal) * 100) : 0;
 
         const storageOutput = await executeShellCommand('df -h /');
-        const storageLine = storageOutput.split('\n')[1];
-        const storageUsage = parseInt(storageLine.split(/\s+/)[4].replace('%',''));
+        const storageLine = (storageOutput || '').split('\n')[1] || '';
+        const storageUsage = parseInt((storageLine.split(/\s+/)[4] || '0').replace('%','')) || 0;
 
-        // CPU usage: compute from /proc/stat sampling to get an instantaneous percent
         const readCpuStat = () => {
-            const stat = fs.readFileSync('/proc/stat', 'utf8');
-            const cpuLine = stat.split('\n').find(l => l.startsWith('cpu '));
-            if (!cpuLine) return null;
-            const parts = cpuLine.trim().split(/\s+/).slice(1).map(p => parseInt(p, 10) || 0);
-            // fields: user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice
-            const idle = (parts[3] || 0) + (parts[4] || 0);
-            const total = parts.reduce((a, b) => a + b, 0);
-            return { idle, total };
+            try {
+                const stat = fs.readFileSync('/proc/stat', 'utf8');
+                const cpuLine = stat.split('\n').find(l => l.startsWith('cpu '));
+                if (!cpuLine) return null;
+                const parts = cpuLine.trim().split(/\s+/).slice(1).map(p => parseInt(p, 10) || 0);
+                const idle = (parts[3] || 0) + (parts[4] || 0);
+                const total = parts.reduce((a, b) => a + b, 0);
+                return { idle, total };
+            } catch (e) {
+                logger.warn('readCpuStat failed', e);
+                return null;
+            }
         };
 
         const a = readCpuStat();
@@ -224,7 +277,7 @@ async function getSystemResourceUsage() {
 
         return { cpuUsage, memoryUsage, storageUsage };
     } catch (e) {
-        console.error('getSystemResourceUsage error', e);
+        logger.error('getSystemResourceUsage error', e);
         return { cpuUsage:0, memoryUsage:0, storageUsage:0 };
     }
 }
@@ -234,35 +287,52 @@ async function getSlurmNodeStats() {
     try {
         // Request per-node output from sinfo (-N) so we count nodes individually instead of aggregated partition lines
         // Use "%N %T" so we can robustly parse the node name and its state (state is the last token)
-        const output = await executeShellCommand('sinfo -h -N -o "%N %T"');
-            const lines = output.trim().split('\n').filter(l => l.length > 0);
+        // Cache the raw sinfo output for a short time (5s) to reduce repeated slurm calls under load
+        const output = await cache.getOrSet('sinfo_per_node', 5000, async () => {
+            return await executeShellCommand('sinfo -h -N -o "%N %T"');
+        });
+            const lines = (output || '').trim().split('\n').filter(l => l.length > 0);
             console.log('sinfo per-node output lines (count=' + lines.length + '):', lines.slice(0, 20)); // Log a sample for debugging
 
-            let nodesActive = 0, nodesMaintenance = 0, nodesErrors = 0;
-            lines.forEach(line => {
-                // state is the last whitespace-separated token in the line (node names won't contain spaces)
-                const parts = line.trim().split(/\s+/);
-                const state = parts.length ? parts[parts.length - 1].toUpperCase() : '';
+            // Build a map nodeName -> most severe state seen for that node (dedupe across partitions/lines)
+            const nodeStateMap = new Map();
+            const severity = (st) => {
+                if (!st) return 0;
+                const s = st.toUpperCase();
+                if (['DRAINED','DOWN','ERROR','FAIL','UNKNOWN','DRAIN'].includes(s)) return 4;
+                if (['MAINT','MAINTENANCE'].includes(s)) return 3;
+                if (['ALLOCATED','MIXED','ALLOC'].includes(s)) return 2;
+                // IDLE and others are least severe
+                return 1;
+            };
 
-                // Define semantics:
-                // - nodesActive: nodes that are currently allocated (or partially allocated/mixed)
-                // - nodesMaintenance: nodes under maintenance
-                // - nodesErrors: nodes in down/drained/error states
-                // Note: IDLE should NOT be counted as active — it is available for allocation.
-                if (['ALLOCATED', 'MIXED'].includes(state)) {
-                    nodesActive++;
-                } else if (['MAINT', 'MAINTENANCE'].includes(state)) {
-                    nodesMaintenance++;
-                } else if (['DRAINED', 'DOWN', 'ERROR', 'FAIL', 'UNKNOWN'].includes(state)) {
-                    nodesErrors++;
+            lines.forEach(line => {
+                const parts = line.trim().split(/\s+/);
+                if (parts.length < 2) return;
+                const stateRaw = parts[parts.length - 1].toUpperCase();
+                const nodeName = parts.slice(0, parts.length - 1).join(' ');
+
+                const existing = nodeStateMap.get(nodeName);
+                if (!existing) {
+                    nodeStateMap.set(nodeName, stateRaw);
                 } else {
-                    // everything else (e.g., IDLE, COMPLETED, etc.) is considered available / not active
+                    // keep the most severe state
+                    const existingScore = severity(existing);
+                    const newScore = severity(stateRaw);
+                    if (newScore > existingScore) nodeStateMap.set(nodeName, stateRaw);
                 }
             });
-            const nodesTotal = lines.length; // Total nodes from sinfo per-node output
-            // Available nodes = total minus maintenance, error and currently active (allocated/mixed)
+
+            let nodesActive = 0, nodesMaintenance = 0, nodesErrors = 0;
+            for (const [n, st] of nodeStateMap.entries()) {
+                if (['ALLOCATED', 'MIXED', 'ALLOC'].includes(st)) nodesActive++;
+                else if (['MAINT', 'MAINTENANCE'].includes(st)) nodesMaintenance++;
+                else if (['DRAINED', 'DOWN', 'ERROR', 'FAIL', 'UNKNOWN', 'DRAIN'].includes(st)) nodesErrors++;
+            }
+
+            const nodesTotal = nodeStateMap.size; // distinct nodes
             const nodesAvailable = Math.max(0, nodesTotal - nodesMaintenance - nodesErrors - nodesActive);
-        return { nodesActive, nodesMaintenance, nodesAvailable, nodesErrors, nodesTotal }; // Return nodesTotal for completeness
+        return { nodesActive, nodesMaintenance, nodesAvailable, nodesErrors, nodesTotal };
     } catch (e) {
         console.error('getSlurmNodeStats error', e);
         return { nodesActive:0, nodesMaintenance:0, nodesAvailable:0, nodesErrors:0, nodesTotal:0 };
@@ -272,8 +342,11 @@ async function getSlurmNodeStats() {
 // Return a map of nodeName -> slurmState using sinfo per-node output
 async function getSlurmNodeStateMap() {
     try {
-        const output = await executeShellCommand('sinfo -h -N -o "%N %T"');
-        const lines = output.trim().split('\n').filter(l => l.length > 0);
+            // Use the same cached sinfo_per_node to avoid duplicate calls
+            const output = await cache.getOrSet('sinfo_per_node', 5000, async () => {
+                return await executeShellCommand('sinfo -h -N -o "%N %T"');
+            });
+        const lines = (output || '').trim().split('\n').filter(l => l.length > 0);
         const map = {};
         lines.forEach(line => {
             const parts = line.trim().split(/\s+/);
@@ -399,7 +472,7 @@ authRouter.post('/register', async (req, res) => {
         // Si ya existe una cuenta del sistema (mostrar/consultar), rechazamos
         const adminLevel = await getAdminLevelFromSlurm(username);
         if (adminLevel && adminLevel !== 'None') {
-            return res.status(409).json({ message: 'User already exists on the system.' });
+            return res.status(409).json({ success:false, message: 'El usuario ya existe en el sistema.' });
         }
 
         // Verificar si ya hay una solicitud pendiente en Redis
@@ -409,12 +482,14 @@ authRouter.post('/register', async (req, res) => {
             return res.status(409).json({ message: 'A registration request for this username is already pending.' });
         }
 
-        // Guardar la solicitud en Redis. Nota: almacenamos la contraseña temporalmente para poder crear el usuario
-        // cuando el admin lo apruebe. En producción sería recomendable cifrarla o usar otro flujo seguro.
-    const payload = JSON.stringify({ username, email, password, justification: justification.toString().trim(), createdAt: new Date().toISOString() });
+        if (!process.env.REGISTRATION_KEY) {
+            logger.error('REGISTRATION_KEY not set, refusing to store passwords even encrypted');
+            return res.status(500).json({ success:false, message: 'Configuración del servidor incompleta. CONTACT_ADMIN', code: 'CONFIG' });
+        }
+        const encryptedPassword = cryptoUtils.encrypt(password);
+        const payload = JSON.stringify({ username, email, encryptedPassword, justification: justification.toString().trim(), createdAt: new Date().toISOString() });
         await RedisClient.set(pendingKey, payload);
-
-        return res.status(202).json({ message: 'Registration received and pending admin approval.' });
+        return res.status(202).json({ success:true, message: 'Solicitud recibida y pendiente de aprobación por admin.' });
 
     } catch (error) {
         console.error('Error handling registration request:', error);
@@ -429,24 +504,23 @@ authRouter.get('/check-username', async (req, res) => {
     if (!username) return res.status(400).json({ available: false, message: 'username query param required' });
 
     try {
-        // 1 Check if user already exists in system via manage_user.sh 'show'
         const adminLevel = await getAdminLevelFromSlurm(username);
-        if (adminLevel && adminLevel !== 'None') {
-            return res.json({ available: false, message: 'User already exists on the system' });
-        }
-
-        // 2 Check pending registrations in Redis
+        if (adminLevel && adminLevel !== 'None') return res.json({ available: false, message: 'El usuario ya existe en el sistema' });
         const pendingKey = `pending:${username}`;
         const existing = await RedisClient.get(pendingKey);
         if (existing) {
-            return res.json({ available: false, message: 'Registration request is already pending for this username' });
+            try {
+                const parsed = JSON.parse(existing);
+                if (parsed && parsed.encryptedPassword) return res.json({ available: false, message: 'Ya existe una solicitud pendiente para este usuario' });
+            } catch (e) {
+                // If parsing fails, treat as pending to be safe
+                return res.json({ available: false, message: 'Ya existe una solicitud pendiente para este usuario' });
+            }
         }
-
-        // Otherwise available
-        return res.json({ available: true, message: 'Username available' });
+        return res.json({ available: true, message: 'Usuario disponible' });
     } catch (err) {
-        console.error('Error checking username availability for', username, err);
-        return res.status(500).json({ available: false, message: 'Internal server error' });
+        logger.error('Error comprobando disponibilidad de username', { username, err });
+        return res.status(500).json({ available: false, message: 'Error interno' });
     }
 });
 
@@ -498,36 +572,25 @@ authRouter.post('/login', async (req, res) => {
             await punManager.checkOrCreatePUN(username, userCodePath);
             console.log(`PUN check/creation completed for user '${username}'. Socket path: ${socketPath}`);
 
-            const nginxUpstreamConfig = `upstream ${username}_pun_backend { server unix:${socketPath}; }`;
-
-            const activePuns = punManager.getActivePuns();
-            let mapFileContent = '';
-            for (const user of activePuns.keys()) {
-                mapFileContent += `${user} "${user}_pun_backend";\n`;
+            // Delegate NGINX config update to external script to avoid complicated
+            // shell-injection / quoting issues inside Node and to keep server code small.
+            console.log(`Updating NGINX configuration via script for '${username}'...`);
+            try {
+                const updater = spawn('sudo', ['/bin/bash', UPDATE_NGINX_SCRIPT_PATH, username, socketPath]);
+                let upOut = '';
+                let upErr = '';
+                updater.stdout.on('data', (d) => { upOut += d.toString(); });
+                updater.stderr.on('data', (d) => { upErr += d.toString(); });
+                updater.on('close', (code) => {
+                    if (code !== 0) {
+                        console.error(`CRITICAL NGINX CONFIG UPDATE FAIL for '${username}': exit ${code}`, upErr.trim());
+                    } else {
+                        console.log(`✅ NGINX reconfigured successfully for ${username}.`, upOut.trim());
+                    }
+                });
+            } catch (e) {
+                console.error('Failed to spawn nginx update script:', e);
             }
-
-            const tempUpstreamPath = `/tmp/${username}.conf`;
-            const tempMapPath = '/tmp/user_map.conf';
-            fs.writeFileSync(tempUpstreamPath, nginxUpstreamConfig);
-            fs.writeFileSync(tempMapPath, mapFileContent);
-            console.log(`NGINX config files written for '${username}'.`);
-
-            const bashCommands = `
-            mv ${tempUpstreamPath} ${NGINX_PUNS_ENABLED_DIR}/${username}.conf &&
-            mv ${tempMapPath} ${NGINX_USER_MAP_PATH} &&
-            nginx -t
-            nginx -s reload`;
-
-            const command = `sudo /bin/bash -c "${bashCommands}"`;
-            console.log(`Executing NGINX reload command for '${username}'.`);
-
-            exec(command, (error, stdout, stderr) => {
-                if (error) {
-                    console.error('CRITICAL NGINX RELOAD FAIL:', stderr);
-                } else {
-                    console.log(`✅ NGINX reconfigurado exitosamente para ${username}.`);
-                }
-            });
 
             const token = jwt.sign({ sub: username, role: role }, JWT_SECRET, { expiresIn: '1h' });
             res.cookie('user_session', username, { path: '/', maxAge: 3600000, secure: process.env.NODE_ENV === 'production', sameSite: 'strict' });
@@ -568,24 +631,23 @@ authRouter.post('/logout', authenticateToken, async (req, res) => {
         }
 
 
-        const tempMapPath = '/tmp/user_map.conf';
-        fs.writeFileSync(tempMapPath, mapFileContent);
-
-        const bashCommands = `
-            rm -f ${nginxPunConfPath} &&
-            mv ${tempMapPath} ${NGINX_USER_MAP_PATH} &&
-            nginx -t &&
-            nginx -s reload
-        `;
-        const command = `sudo /bin/bash -c "${bashCommands}"`;
-
-        exec(command, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`Error cleaning up NGINX config for ${username}:`, stderr);
-            } else {
-                console.log(`✅ NGINX configuration cleaned up for ${username}.`);
-            }
-        });
+        // Delegate nginx cleanup to update_nginx_config.sh in --remove mode
+        try {
+            const updater = spawn('sudo', ['/bin/bash', UPDATE_NGINX_SCRIPT_PATH, '--remove', username]);
+            let upOut = '';
+            let upErr = '';
+            updater.stdout.on('data', (d) => { upOut += d.toString(); });
+            updater.stderr.on('data', (d) => { upErr += d.toString(); });
+            updater.on('close', (code) => {
+                if (code !== 0) {
+                    console.error(`Error cleaning up NGINX config for ${username}: exit ${code}`, upErr.trim());
+                } else {
+                    console.log(`✅ NGINX configuration cleaned up for ${username}.`, upOut.trim());
+                }
+            });
+        } catch (e) {
+            console.error('Failed to spawn nginx update script for remove:', e);
+        }
 
         res.clearCookie('user_session', { path: '/' });
         res.clearCookie('access_token', { httpOnly: true, path: '/' });
@@ -729,14 +791,28 @@ dashboardRouter.get('/stats', async (req, res) => {
 
         // For non-admin users, we still want to include global node summaries (state per node)
         // but we must not expose privileged per-node compute details. Build a lightweight nodes list
-        // from sinfo (name + state) and merge it into the proxied response.
+        // from sinfo (name + state) and also include lightweight global job/resource summaries
+        // fetched locally so the frontend shows consistent totals.
         let nodesSummary = [];
+        let jobStats = { totalJobs: 0, runningJobs: 0, queuedJobs: 0, completedToday: 0, activeUsers: 0 };
+        let resourceUsage = { cpuUsage: 0, memoryUsage: 0, storageUsage: 0 };
         try {
             const stateMap = await getSlurmNodeStateMap();
             nodesSummary = Object.keys(stateMap).map(n => ({ name: n, state: stateMap[n] }));
         } catch (e) {
             console.warn('Could not build nodes summary for non-admin proxied response:', e);
             nodesSummary = [];
+        }
+        try {
+            // Obtain lightweight globals (non-privileged) to merge into the proxied user response
+            jobStats = await getSlurmJobStats();
+        } catch (e) {
+            console.warn('Could not obtain slurm job stats for non-admin response:', e);
+        }
+        try {
+            resourceUsage = await getSystemResourceUsage();
+        } catch (e) {
+            console.warn('Could not obtain system resource usage for non-admin response:', e);
         }
 
         const udsReq = http.request(options, (udsRes) => {
@@ -745,15 +821,39 @@ dashboardRouter.get('/stats', async (req, res) => {
             udsRes.on('end', () => {
                 try {
                     const parsed = JSON.parse(body);
-                    if (parsed.success && parsed.data) {
-                        // Fusionar las estadísticas de nodos globales con la respuesta del PUN
-                        parsed.data = Object.assign({}, parsed.data, globalNodeStats);
-                    }
-                    // Merge a lightweight nodes summary for non-admin users if not present
                     if (!parsed.data) parsed.data = {};
-                    if (!parsed.data.nodes || !Array.isArray(parsed.data.nodes) || parsed.data.nodes.length === 0) {
-                        parsed.data.nodes = parsed.data.nodes || nodesSummary;
+                    // Build final data preferring PUN-provided fields but falling back to
+                    // reliable global values for counts and resource usage when PUN omits them
+                    const final = Object.assign({}, parsed.data);
+
+                    const fillIfMissing = (key, src) => {
+                        if (typeof final[key] !== 'number' || isNaN(final[key])) {
+                            if (typeof src[key] === 'number') final[key] = src[key];
+                        }
+                    };
+
+                    // Fill numeric job/resource/node totals from local sources when missing
+                    [
+                        ['totalJobs', jobStats],
+                        ['runningJobs', jobStats],
+                        ['queuedJobs', jobStats],
+                        ['completedToday', jobStats],
+                        ['activeUsers', jobStats],
+                        ['cpuUsage', resourceUsage],
+                        ['memoryUsage', resourceUsage],
+                        ['storageUsage', resourceUsage],
+                        ['nodesActive', globalNodeStats],
+                        ['nodesMaintenance', globalNodeStats],
+                        ['nodesAvailable', globalNodeStats],
+                        ['nodesErrors', globalNodeStats]
+                    ].forEach(([k, src]) => fillIfMissing(k, src));
+
+                    // Ensure nodes array exists (use nodesSummary if PUN didn't include nodes)
+                    if (!Array.isArray(final.nodes) || final.nodes.length === 0) {
+                        final.nodes = nodesSummary;
                     }
+
+                    parsed.data = final;
                     return res.status(udsRes.statusCode || 200).json(parsed);
                 } catch (e) {
                     console.error('Error parsing PUN response:', e, 'raw:', body);
@@ -842,7 +942,11 @@ jobsRouter.get('/users', authenticateToken, async (req, res) => {
         const since = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
         // Request User field from sacct; -P pipe format and -n no header
         const cmd = `sacct -P -n -S ${since} -o User`;
-        const out = await executeShellCommand(cmd, true);
+        const usersKey = `sacct_users:${since}`;
+        // Cache sacct user list briefly (5s)
+        const out = await cache.getOrSet(usersKey, 5000, async () => {
+            return await executeShellCommand(cmd, true);
+        });
         const lines = out.trim().split('\n').filter(l => l && l.trim().length > 0);
         const users = lines.map(l => (l || '').toString().trim()).filter(u => !!u);
         const uniq = Array.from(new Set(users)).sort();
@@ -944,6 +1048,16 @@ app.get('/api/history', authenticateToken, (req, res) => {
     res.redirect(307, `/api/v1/jobs/history${qs ? `?${qs}` : ''}`);
 });
 
+// Global error handler (normalizado)
+app.use((err, req, res, next) => {
+    logger.error('Unhandled error', { err: (err && (err.stack || err.message)) || String(err) });
+    if (!res.headersSent) {
+        res.status(500).json({ success: false, message: 'Error interno' });
+    } else {
+        next(err);
+    }
+});
+
 app.listen(LISTEN_PORT, () => {
-    console.log(`🚀 Portero service listening on port ${LISTEN_PORT}`);
+    logger.info({ msg: 'Portero service listening', port: LISTEN_PORT });
 });

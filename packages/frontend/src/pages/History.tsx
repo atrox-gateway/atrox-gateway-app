@@ -14,8 +14,8 @@ import {
   Calendar,
   CheckCircle,
   XCircle,
-  AlertTriangle
-  ,
+  AlertTriangle,
+  Pause,
   RefreshCw
 } from "lucide-react";
 import { Layout } from "@/components/Layout";
@@ -39,13 +39,20 @@ type JobItem = {
 };
 
 type NormalizedStatus = {
-  kind: 'completed'|'failed'|'cancelled'|'running'|'unknown';
+  kind: 'completed'|'failed'|'cancelled'|'running'|'queued'|'unknown';
   raw?: string;
   cancelReason?: string | null;
 };
 
-const normalizeJobStatus = (status: any): NormalizedStatus => {
-  const raw = status == null ? '' : String(status);
+const normalizeJobStatus = (statusOrJob: any): NormalizedStatus => {
+  // Accept either a raw status string or a job object. Prefer job.raw_status when available.
+  let raw = '';
+  if (statusOrJob && typeof statusOrJob === 'object') {
+    // Common backend fields: raw_status, rawStatus, status
+    raw = String(statusOrJob.raw_status ?? statusOrJob.rawStatus ?? statusOrJob.status ?? '');
+  } else {
+    raw = statusOrJob == null ? '' : String(statusOrJob);
+  }
   const s = raw.trim().toLowerCase();
 
   // try to extract cancel reason like 'cancelled by 1002' -> '1002'
@@ -58,6 +65,8 @@ const normalizeJobStatus = (status: any): NormalizedStatus => {
   if (s.includes('complete')) return { kind: 'completed', raw, cancelReason };
   if (s.includes('fail')) return { kind: 'failed', raw, cancelReason };
   if (s.includes('cancel')) return { kind: 'cancelled', raw, cancelReason };
+  // Pending/queue states
+  if (s.includes('pending') || s.includes('configuring') || s.includes('requeued') || s.includes('queue')) return { kind: 'queued', raw, cancelReason };
   if (s.includes('run')) return { kind: 'running', raw, cancelReason };
 
   return { kind: 'unknown', raw, cancelReason };
@@ -91,8 +100,8 @@ const History = () => {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const getStatusBadge = (status: string, exitCode?: number) => {
-    const norm = normalizeJobStatus(status);
+  const getStatusBadge = (job: any) => {
+    const norm = normalizeJobStatus(job);
     switch (norm.kind) {
       case 'completed':
         return (
@@ -115,6 +124,13 @@ const History = () => {
             Cancelado
           </Badge>
         );
+      case 'queued':
+        return (
+          <Badge variant="secondary">
+            <Pause className="w-3 h-3 mr-1" />
+            En Cola
+          </Badge>
+        );
       case 'running':
         return (
           <Badge className="bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">
@@ -130,9 +146,9 @@ const History = () => {
   // Compute summary metrics from fetched jobs
   const getEfficiencyMetrics = () => {
     const total = jobs.length || 0;
-    const completed = jobs.filter(job => normalizeJobStatus(job.status).kind === 'completed').length;
-    const failed = jobs.filter(job => normalizeJobStatus(job.status).kind === 'failed').length;
-    const cancelled = jobs.filter(job => normalizeJobStatus(job.status).kind === 'cancelled').length;
+    const completed = jobs.filter(job => normalizeJobStatus(job).kind === 'completed').length;
+    const failed = jobs.filter(job => normalizeJobStatus(job).kind === 'failed').length;
+    const cancelled = jobs.filter(job => normalizeJobStatus(job).kind === 'cancelled').length;
     const successRate = total > 0 ? Math.round((completed / total) * 100) : 0;
     const cancelledRate = total > 0 ? Math.round((cancelled / total) * 100) : 0;
     const failedRate = total > 0 ? Math.round((failed / total) * 100) : 0;
@@ -251,7 +267,7 @@ const History = () => {
       return Math.round(serverMetrics.averageDurationSeconds);
     }
 
-    const completedJobs = jobs.filter(j => normalizeJobStatus(j.status).kind === 'completed');
+  const completedJobs = jobs.filter(j => normalizeJobStatus(j).kind === 'completed');
     const durations = completedJobs.map(j => parseDurationToSeconds(j.duration || j.submit_time || j.end_time || j.end_time)).filter(n => n > 0);
     if (durations.length === 0) return 0;
     const sum = durations.reduce((a, b) => a + b, 0);
@@ -358,12 +374,12 @@ const History = () => {
           const arr: any[] = Array.isArray(d2) ? d2 : (d2.data || []);
           // compute metrics from full array
           const total = arr.length;
-          const completed = arr.filter(j => normalizeJobStatus(j?.status).kind === 'completed').length;
-          const failed = arr.filter(j => normalizeJobStatus(j?.status).kind === 'failed').length;
-          const cancelled = arr.filter(j => normalizeJobStatus(j?.status).kind === 'cancelled').length;
+          const completed = arr.filter(j => normalizeJobStatus(j).kind === 'completed').length;
+          const failed = arr.filter(j => normalizeJobStatus(j).kind === 'failed').length;
+          const cancelled = arr.filter(j => normalizeJobStatus(j).kind === 'cancelled').length;
           // average duration seconds over completed jobs
           const durations = arr
-            .filter(j => normalizeJobStatus(j?.status).kind === 'completed')
+            .filter(j => normalizeJobStatus(j).kind === 'completed')
             .map(j => parseDurationToSeconds(j?.duration || j?.submit_time || j?.end_time))
             .filter(n => n > 0);
           const avg = durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null;
@@ -427,8 +443,10 @@ const History = () => {
         const resp = await fetch(`/api/v1/jobs/users?days=${days}`, { credentials: 'include' });
         if (!resp.ok) return;
         const data = await resp.json();
-        if (mounted && Array.isArray(data)) {
-          setUsers(data);
+        // Server responses are wrapped as { success: true, data: ... }
+        const list = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
+        if (mounted && Array.isArray(list)) {
+          setUsers(list);
         }
       } catch (e) {
         // ignore
@@ -442,10 +460,9 @@ const History = () => {
   const displayedJobs = useMemo(() => {
     const q = (searchTerm || '').toString().trim().toLowerCase();
     const filtered = jobs.filter((job) => {
-      // Status filter
+      // Status filter: use normalized kind so fields like `raw_status` are considered
       if (filter && filter !== 'all') {
-        const status = (job.status || '').toString().toLowerCase();
-        if (!status.includes(filter)) return false;
+        if (normalizeJobStatus(job).kind !== filter) return false;
       }
 
       // Search term: match id, name, user and output
@@ -619,7 +636,7 @@ const History = () => {
                   <div>
                     <CardTitle className="flex items-center gap-3">
                       {job.name}
-                      {getStatusBadge(job.status, job.exit_code)}
+                      {getStatusBadge(job)}
                     </CardTitle>
                     <CardDescription>
                       ID: {job.id} • Usuario: {getJobUser(job)}
@@ -662,7 +679,7 @@ const History = () => {
                   </div>
                 </div>
                 
-                {normalizeJobStatus(job.status).kind === 'failed' && ((job as any).errorMsg || job.error_msg) && (
+                {normalizeJobStatus(job).kind === 'failed' && ((job as any).errorMsg || job.error_msg) && (
                   <div className="mt-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
                     <div className="flex items-center gap-2 text-destructive text-sm">
                       <AlertTriangle className="h-4 w-4" />

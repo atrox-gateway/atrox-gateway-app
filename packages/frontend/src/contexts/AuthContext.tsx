@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import parseApiResponse from '../lib/fetcher';
 
 // --- INTERFACES ---
 interface User {
@@ -43,7 +44,7 @@ async function fetchWhoamiWithRetry(retries = 5, baseDelay = 500): Promise<any> 
         const bodyText = await res.text().catch(() => '');
         throw new Error(`Whoami failed ${res.status}: ${bodyText}`);
       }
-      return await res.json();
+  return await parseApiResponse(res as any);
     } catch (err: any) {
       attempt++;
       if (attempt > retries) {
@@ -83,11 +84,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const response = await fetch('/api/v1/user/whoami', { credentials: 'include' });
 
         if (response.ok) {
-          const userInfo = await response.json();
+          const userInfo = await parseApiResponse(response as any);
 
-          const userObject: User = { 
-            id: uuidv4(), 
-            username: userInfo.username, 
+          const userObject: User = {
+            id: uuidv4(),
+            username: userInfo.username,
             email: userInfo.email || `${userInfo.username}@alumnos.udg.mx`,
             role: userInfo.role
           };
@@ -117,8 +118,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw new Error(data.message || `Registration failed (${response.status})`);
     }
 
-    // 202 Accepted -> pending approval
-    const data = await response.json();
+  // 202 Accepted -> pending approval
+  await parseApiResponse(response as any);
     return true;
   };
 

@@ -8,6 +8,7 @@ import { MoreHorizontal, PlusCircle, AlertTriangle } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import parseApiResponse from "@/lib/fetcher";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,12 +32,7 @@ interface User {
 // Función para obtener los usuarios desde el backend
 const fetchUsers = async (): Promise<User[]> => {
   const response = await fetch('/api/v1/admin/users', { credentials: 'include' });
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ message: response.statusText }));
-    throw new Error(errorData.message || 'Error al cargar los usuarios.');
-  }
-  const data = await response.json();
-  return data.details;
+  return await parseApiResponse(response) as User[];
 };
 
 // Función para crear un nuevo usuario
@@ -47,11 +43,7 @@ const createUser = async (userData: any) => {
     body: JSON.stringify(userData),
     credentials: 'include',
   });
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ message: response.statusText }));
-    throw new Error(errorData.message || 'Error al crear el usuario.');
-  }
-  return await response.json();
+  return await parseApiResponse(response);
 };
 
 // Función para eliminar un usuario
@@ -60,42 +52,36 @@ const deleteUser = async (username: string) => {
     method: 'DELETE',
     credentials: 'include',
   });
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ message: response.statusText }));
-    throw new Error(errorData.message || 'Error al eliminar el usuario.');
-  }
-  return await response.json();
+  return await parseApiResponse(response);
 };
 
 // Función para editar un usuario
 const editUser = async ({ username, values }: { username: string; values: any }) => {
-  const promises: Promise<Response>[] = [];
+  const promises: Promise<any>[] = [];
   // Solo se actualiza la contraseña si se proporciona una nueva
   if (values.password) {
-    promises.push(fetch(`/api/v1/admin/users/${username}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ attribute: 'password', value: values.password }),
-      credentials: 'include',
-    }));
+    promises.push(
+      fetch(`/api/v1/admin/users/${username}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attribute: 'password', value: values.password }),
+        credentials: 'include',
+      }).then(parseApiResponse)
+    );
   }
   if (values.account) {
     // Enviar el atributo que el script espera: 'account'
-    promises.push(fetch(`/api/v1/admin/users/${username}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ attribute: 'account', value: values.account }),
-      credentials: 'include',
-    }));
+    promises.push(
+      fetch(`/api/v1/admin/users/${username}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attribute: 'account', value: values.account }),
+        credentials: 'include',
+      }).then(parseApiResponse)
+    );
   }
 
-  const responses = await Promise.all(promises);
-  for (const res of responses) {
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(errorData.message || 'Error al actualizar el usuario.');
-    }
-  }
+  await Promise.all(promises);
   return { success: true };
 };
 
@@ -106,12 +92,7 @@ const UserManagement = () => {
   // Fetch registrations when needed
   const fetchRegistrations = async () => {
     const response = await fetch('/api/v1/admin/registrations', { credentials: 'include' });
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({ message: response.statusText }));
-      throw new Error(err.message || 'Error al cargar las solicitudes.');
-    }
-    const data = await response.json();
-    return data.details as Array<{ username: string; email: string; createdAt: string; justification?: string }>;
+    return await parseApiResponse(response) as Array<{ username: string; email: string; createdAt: string; justification?: string }>;
   };
 
   const { data: registrations, refetch: refetchRegistrations, isLoading: regsLoading } = useQuery({
@@ -182,11 +163,7 @@ const UserManagement = () => {
         method: 'POST',
         credentials: 'include',
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: res.statusText }));
-        throw new Error(err.message || 'Error approving registration');
-      }
-      return await res.json();
+      return await parseApiResponse(res);
     },
     onSuccess: () => {
       toast.success('Solicitud aprobada');
@@ -204,11 +181,7 @@ const UserManagement = () => {
         method: 'DELETE',
         credentials: 'include',
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: res.statusText }));
-        throw new Error(err.message || 'Error denying registration');
-      }
-      return await res.json();
+      return await parseApiResponse(res);
     },
     onSuccess: () => {
       toast.success('Solicitud denegada y eliminada');

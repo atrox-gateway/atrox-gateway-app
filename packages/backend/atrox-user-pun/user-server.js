@@ -7,6 +7,8 @@ const path = require('path');
 const os = require('os');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
+const sharedLibsPath = path.join(__dirname, '..', 'shared-libraries');
+const logger = require(path.join(sharedLibsPath, 'logger.js'));
 
 const app = express();
 const socketPath = process.argv[2];
@@ -17,6 +19,27 @@ const WWW_DATA_GID = 33;
 app.use(cookieParser());
 // Parse JSON bodies (required for file create/update/upload which send base64 payloads)
 app.use(express.json({ limit: '250mb' }));
+
+// Normalizar respuestas JSON para el PUN
+app.use((req, res, next) => {
+    const originalJson = res.json.bind(res);
+    res.json = (body) => {
+        try {
+            const status = res.statusCode || 200;
+            if (body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'success')) return originalJson(body);
+            if (status >= 400) {
+                const message = (body && (body.message || body.error)) || 'Error';
+                const payload = { success: false, message };
+                if (body && typeof body === 'object') payload.detail = body;
+                return originalJson(payload);
+            }
+            return originalJson({ success: true, data: body, message: null });
+        } catch (e) {
+            return originalJson(body);
+        }
+    };
+    next();
+});
 
 function cleanupAndExit() {
     if (fs.existsSync(socketPath)) {
@@ -49,18 +72,18 @@ app.use(touchSocketMiddleware);
 const authenticateToken = (req, res, next) => {
     const token = req.cookies.access_token;
     if (!token) {
-        return res.status(401).send('Access Denied: No token provided.');
+        return res.status(401).json({ success: false, message: 'Acceso denegado: token ausente.' });
     }
 
     jwt.verify(token, JWT_SECRET, (err, decoded) => {
         if (err) {
-            return res.status(403).send('Access Forbidden: Invalid token.');
+            return res.status(403).json({ success: false, message: 'Acceso prohibido: token inválido.' });
         }
 
         const processUser = os.userInfo().username;
         if (decoded.sub !== processUser) {
-            console.error(`SECURITY ALERT: Process for user '${processUser}' received a token for user '${decoded.sub}'.`);
-            return res.status(403).send('Access Forbidden: Token-process mismatch.');
+            logger.warn(`SECURITY ALERT: Process for user '${processUser}' received a token for user '${decoded.sub}'.`);
+            return res.status(403).json({ success: false, message: 'Acceso prohibido: token no coincide con proceso.' });
         }
 
         req.user = decoded;
@@ -126,19 +149,22 @@ function executeShellCommand(command) {
 async function getUserSlurmJobStats(username) {
     try {
         const output = await executeShellCommand(`squeue -h -u ${username} -o "%T"`);
-        const lines = output.trim().split('\n').filter(line => line.length > 0);
+        const rawLines = output.trim().split('\n').filter(line => line.length > 0);
 
-        let totalJobs = lines.length;
+        let totalJobs = 0;
         let runningJobs = 0;
         let queuedJobs = 0;
         let completedToday = 0;
 
-        lines.forEach(state => {
-            if (state === 'RUNNING') {
-                runningJobs++;
-            } else if (['PENDING', 'CONFIGURING', 'REQUEUED'].includes(state)) {
-                queuedJobs++;
-            }
+        // Only count lines that contain known Slurm states (avoid counting banners/garbage)
+        const knownStates = ['RUNNING','PENDING','CONFIGURING','REQUEUED','COMPLETED','CANCELLED','FAILED','TIMEOUT','SUSPENDED','COMPLETING'];
+        rawLines.forEach(raw => {
+            const state = (raw || '').toString().toUpperCase().replace(/[^A-Z]/g, '');
+            if (!state) return;
+            if (!knownStates.some(s => state.includes(s))) return;
+            totalJobs++;
+            if (state.includes('RUNNING')) runningJobs++;
+            else if (['PENDING','CONFIGURING','REQUEUED'].some(s => state.includes(s))) queuedJobs++;
         });
 
         // Obtener trabajos completados hoy usando sacct para el usuario específico
@@ -161,6 +187,44 @@ async function getUserResourceUsage(username) {
         memoryUsage: Math.floor(Math.random() * 20),
         storageUsage: Math.floor(Math.random() * 50),
     };
+}
+
+// Obtener estadísticas de nodos del cluster usando sinfo
+async function getClusterNodeStats() {
+    try {
+        // Salida: varias líneas con "STATE|NODES" por ejemplo "idle|2" o "alloc|3"
+        const out = await executeShellCommand('sinfo -h -o "%t|%D"');
+        const lines = (out || '').trim().split('\n').filter(l => l.trim().length > 0);
+        let nodesActive = 0;
+        let nodesAvailable = 0;
+        let nodesMaintenance = 0;
+        let nodesErrors = 0;
+
+        lines.forEach(line => {
+            const parts = line.split('|');
+            if (parts.length < 2) return;
+            const state = (parts[0] || '').toString().toLowerCase();
+            const count = parseInt((parts[1] || '').toString().replace(/[^0-9]/g, ''), 10) || 0;
+
+            // Clasificar estados comunes (tolerante a variantes como MIXED, ALLOC, allocated)
+            if (state.includes('alloc') || state.includes('mixed') || state.includes('allocated') || state.includes('comp')) {
+                nodesActive += count;
+            } else if (state.includes('idle')) {
+                nodesAvailable += count;
+            } else if (state.includes('drain') || state.includes('drained') || state.includes('maint') || state.includes('down')) {
+                nodesMaintenance += count;
+            } else {
+                // Estados no reconocidos contarlos como errores/otros
+                nodesErrors += count;
+            }
+        });
+
+        return { nodesActive, nodesAvailable, nodesMaintenance, nodesErrors };
+    } catch (e) {
+        // Si sinfo no está disponible o falla, devolvemos ceros (comportamiento tolerante al entorno local)
+        console.error('Error obteniendo estadísticas de nodos con sinfo:', e && (e.stderr || e.message) || String(e));
+        return { nodesActive: 0, nodesAvailable: 0, nodesMaintenance: 0, nodesErrors: 0 };
+    }
 }
 
 // Create user router for PUN and mount under /api/v1/user
@@ -197,6 +261,13 @@ userRouter.get('/dashboard/stats', async (req, res) => {
         const jobStats = await getUserSlurmJobStats(username);
         const resourceUsage = await getUserResourceUsage(username);
 
+        // Obtener estadísticas de nodos desde sinfo (tolerante a entornos sin Slurm)
+        const nodeStats = await getClusterNodeStats();
+
+        // activeUsers: en un PUN por usuario no podemos calcular usuarios únicos del cluster sin permisos,
+        // así que interpretamos "activo" como presencia de jobs del usuario: 0 si no tiene jobs, 1 si tiene alguno.
+        const activeUsers = (jobStats && jobStats.totalJobs && jobStats.totalJobs > 0) ? 1 : 0;
+
         const stats = {
             totalJobs: jobStats.totalJobs,
             runningJobs: jobStats.runningJobs,
@@ -205,11 +276,11 @@ userRouter.get('/dashboard/stats', async (req, res) => {
             cpuUsage: resourceUsage.cpuUsage,
             memoryUsage: resourceUsage.memoryUsage,
             storageUsage: resourceUsage.storageUsage,
-            activeUsers: 1,
-            nodesActive: 0,
-            nodesMaintenance: 0,
-            nodesAvailable: 0,
-            nodesErrors: 0,
+            activeUsers,
+            nodesActive: nodeStats.nodesActive || 0,
+            nodesMaintenance: nodeStats.nodesMaintenance || 0,
+            nodesAvailable: nodeStats.nodesAvailable || 0,
+            nodesErrors: nodeStats.nodesErrors || 0,
         };
 
         return res.json({ success: true, data: stats });
@@ -236,7 +307,9 @@ userRouter.get('/dashboard/stats', async (req, res) => {
                 return {
                     id: jobId || rawJobId,
                     name: jobName || null,
-                    status: state ? state.toLowerCase() : null,
+                    // Normalize status to UI values (running, queued, completed, failed, unknown)
+                    status: mapSlurmStateToUi(state),
+                    raw_status: state || null,
                     submit_time: submit || null,
                     start_time: start || null,
                     end_time: end || null,
@@ -644,8 +717,18 @@ jobsRouter.get('/jobs', authenticateToken, async (req, res) => {
         });
         return res.json({ jobs });
     } catch (e) {
+        // If Slurm is not available or the command fails, log the error but
+        // return an empty jobs array (200) so the frontend can gracefully
+        // show alternative UI or fallbacks instead of treating it as a hard error.
         console.error('Error en GET /api/v1/user/jobs:', e);
-        return res.status(500).json({ error: 'Failed to list jobs', detail: (e && (e.stderr || e.message)) || String(e) });
+        // Helpful debugging info included in logs; do not leak large stderr in response.
+        try {
+            const detail = (e && (e.stderr || e.message)) || String(e);
+            logger.warn({ msg: 'squeue failed for user jobs', user: username, detail: String(detail).slice(0, 1000) });
+        } catch (_err) {}
+        // Return success with empty list to avoid 500 errors in environments
+        // where Slurm is not installed or accessible (e.g., local dev).
+        return res.json({ jobs: [] });
     }
 });
 
@@ -834,18 +917,20 @@ jobsRouter.get('/partitions', authenticateToken, async (req, res) => {
 // Montar jobsRouter bajo /api/v1/user
 app.use('/api/v1/user', jobsRouter);
 
+// Global error handler normalizado
 app.use((err, req, res, next) => {
-    console.error('[PUN ERROR GLOBAL]:', err.stack);
-    res.status(500).send('Internal Server Error');
+    logger.error('Unhandled PUN error', { err: (err && (err.stack || err.message)) || String(err) });
+    if (!res.headersSent) return res.status(500).json({ success: false, message: 'Error interno' });
+    next(err);
 });
 
 app.listen(socketPath, () => {
     try {
         fs.chownSync(socketPath, process.getuid(), WWW_DATA_GID);
         fs.chmodSync(socketPath, '660');
-        console.log(`✅ PUN initiated and socket permissions set for Nginx: ${socketPath}`);
+        logger.info({ msg: 'PUN initiated and socket permissions set for Nginx', socket: socketPath });
     } catch (e) {
-        console.error("FATAL: Failed to change socket ownership/permissions:", e);
+        logger.error('FATAL: Failed to change socket ownership/permissions', e);
         cleanupAndExit();
     }
 });

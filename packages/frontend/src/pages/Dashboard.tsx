@@ -22,15 +22,7 @@ import { useNavigate } from "react-router-dom";
 import { Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Layout } from "@/components/Layout";
 import { useAuth } from "@/contexts/AuthContext";
-// AdminPanel removed — component deleted
 
-const mockRecentJobs = [
-  { id: "job_001", name: "Análisis RNA-Seq", status: "running", progress: 75, user: "Dr. García", time: "2h 15m" },
-  { id: "job_002", name: "Simulación Molecular", status: "queued", progress: 0, user: "Ana López", time: "En cola" },
-  { id: "job_003", name: "ML Training Model", status: "completed", progress: 100, user: "Carlos Ruiz", time: "Completado" },
-  { id: "job_004", name: "Procesamiento Imágenes", status: "failed", progress: 45, user: "María Silva", time: "Error" },
-  { id: "job_005", name: "Análisis Estadístico", status: "running", progress: 30, user: "Dr. Martínez", time: "45m" },
-];
 
 interface DashboardStats {
   totalJobs: number;
@@ -121,7 +113,14 @@ const Dashboard = () => {
     const v = (s || '').toString().toUpperCase();
     // use includes to tolerate suffixes like CANCELLED+ or prefixes/suffixes
     if (v.includes('RUNNING')) return 'running';
-    if (v.includes('PENDING') || v.includes('CONFIGURING') || v.includes('REQUEUED')) return 'queued';
+    // Accept Slurm raw PENDING and common normalized variants (QUEUE, QUEUED)
+    if (
+      v.includes('PENDING') ||
+      v.includes('CONFIGURING') ||
+      v.includes('REQUEUED') ||
+      v.includes('QUEUE') ||
+      v === 'QUEUED'
+    ) return 'queued';
     if (v.includes('COMPLETED')) return 'completed';
     if (v.includes('CANCELLED')) return 'cancelled';
     if (v.includes('FAILED') || v.includes('TIMEOUT')) return 'failed';
@@ -142,7 +141,8 @@ const Dashboard = () => {
       let live: RecentJob[] = [];
       if (liveRes.ok) {
         const body = await liveRes.json().catch(() => ({}));
-        const jobs = Array.isArray(body?.jobs) ? body.jobs : [];
+        // Support both raw shape { jobs: [...] } and wrapped { success: true, data: { jobs: [...] } }
+        const jobs = Array.isArray(body?.jobs) ? body.jobs : (Array.isArray(body?.data?.jobs) ? body.data.jobs : []);
         live = jobs.map((j: any) => ({
           id: String(j.id ?? ''),
           name: String(j.name ?? '—'),
@@ -158,7 +158,9 @@ const Dashboard = () => {
       const histRes = await fetch('/api/v1/user/history?limit=10', { credentials: 'include' });
       let hist: RecentJob[] = [];
       if (histRes.ok) {
-        const arr = await histRes.json().catch(() => []);
+        const arrRaw = await histRes.json().catch(() => []);
+        // Support both direct array and wrapped { success: true, data: [...] }
+        const arr = Array.isArray(arrRaw) ? arrRaw : (Array.isArray(arrRaw?.data) ? arrRaw.data : []);
         if (Array.isArray(arr)) {
           hist = arr.map((h: any) => {
             const ui = mapSlurmToUi(h.status);
@@ -322,10 +324,6 @@ const Dashboard = () => {
         <div className="animate-fade-in-up flex items-start justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold text-gradient flex items-center gap-3">
-              {/* Atrox logo (placeholder.png) on brand blue, larger on dashboard */}
-              <span className="h-10 w-10 rounded bg-primary text-primary-foreground inline-flex items-center justify-center">
-                <img src="/placeholder.png" alt="Atrox" className="h-7 w-7" />
-              </span>
               Dashboard de Control
             </h1>
             <p className="text-muted-foreground mt-2">
@@ -594,7 +592,6 @@ const Dashboard = () => {
         </Card>
       </div>
 
-      {/* AdminPanel removed */}
     </Layout>
   );
 };

@@ -23,10 +23,6 @@ export function TopBar() {
     <header className="h-16 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-6 flex items-center justify-between sticky top-0 z-50">
       <div className="flex items-center gap-4">
         <SidebarTrigger className="h-8 w-8" />
-  {/* Atrox logo (placeholder.png) on brand blue background */}
-  <div className="h-8 w-8 rounded bg-primary text-primary-foreground flex items-center justify-center">
-    <img src="/placeholder.png" alt="Atrox logo" className="h-5 w-5" />
-  </div>
         <div className="relative hidden md:block" onKeyDown={(e) => {
           if (e.key === 'Enter') {
             const q = globalQuery.trim();

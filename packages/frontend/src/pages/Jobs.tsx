@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import parseApiResponse from '../lib/fetcher';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -174,10 +175,9 @@ const Jobs = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/v1/user/jobs", { credentials: "include" });
-      if (!res.ok) throw new Error(`Error ${res.status}`);
-      const data = await res.json();
-      setJobs(Array.isArray(data?.jobs) ? data.jobs : []);
+  const res = await fetch("/api/v1/user/jobs", { credentials: "include" });
+  const data = await parseApiResponse(res as any);
+  setJobs(Array.isArray(data?.jobs) ? data.jobs : []);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg || "No se pudieron cargar los trabajos.");
@@ -190,10 +190,9 @@ const Jobs = () => {
     setLoadingPartitions(true);
     setPartitionError(null);
     try {
-      const res = await fetch("/api/v1/user/partitions", { credentials: "include" });
-      if (!res.ok) throw new Error(`Error ${res.status}`);
-      const data = await res.json();
-      const parts: PartitionInfo[] = Array.isArray(data?.partitions) ? data.partitions : [];
+  const res = await fetch("/api/v1/user/partitions", { credentials: "include" });
+  const data = await parseApiResponse(res as any);
+  const parts: PartitionInfo[] = Array.isArray(data?.partitions) ? data.partitions : [];
       setPartitions(parts);
       // Set default partition (first available without trailing *)
       if (!partition && parts.length > 0) {
@@ -280,10 +279,9 @@ const Jobs = () => {
     setFbError(null);
     try {
       const safePath = path && path.startsWith(USER_HOME_PATH) ? path : USER_HOME_PATH;
-      const res = await fetch(`/api/v1/user/files?path=${encodeURIComponent(safePath)}`, { credentials: 'include' });
-      if (!res.ok) throw new Error(`Error ${res.status}`);
-      const data = await res.json();
-      const list: FileItem[] = Array.isArray(data?.files)
+  const res = await fetch(`/api/v1/user/files?path=${encodeURIComponent(safePath)}`, { credentials: 'include' });
+  const data = await parseApiResponse(res as any);
+  const list: FileItem[] = Array.isArray(data?.files)
         ? data.files.map((f: any) => ({ id: f.id, name: f.name, type: f.type }))
         : [];
       setFbFiles(list);
@@ -314,8 +312,7 @@ const Jobs = () => {
   const pickFileFromPath = async (path: string, displayName: string) => {
     try {
       const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(path)}`, { credentials: 'include' });
-      if (!res.ok) throw new Error(`Error ${res.status}`);
-      const data = await res.json();
+      const data = await parseApiResponse(res as any);
       if (!data?.success) throw new Error('No se pudo leer el archivo.');
       setScriptBase64(data.contentBase64);
       setScriptFileName(displayName);
@@ -356,7 +353,7 @@ const Jobs = () => {
         throw new Error(txt || `Error ${res.status}`);
       }
     }
-    return res.json();
+    return await parseApiResponse(res as any);
   };
 
   // ======= Templates (Plantillas) =======
@@ -411,10 +408,9 @@ const Jobs = () => {
     setTemplatesError(null);
     try {
       await ensureTemplatesDir();
-      const res = await fetch(`/api/v1/user/files?path=${encodeURIComponent(TEMPLATES_DIR)}`, { credentials: 'include' });
-      if (!res.ok) throw new Error(`Error ${res.status}`);
-      const data = await res.json();
-      const files = Array.isArray(data?.files) ? data.files : [];
+  const res = await fetch(`/api/v1/user/files?path=${encodeURIComponent(TEMPLATES_DIR)}`, { credentials: 'include' });
+  const data = await parseApiResponse(res as any);
+  const files = Array.isArray(data?.files) ? data.files : [];
       const list = files
         .filter((f: any) => f.type === 'file' && f.name.endsWith('.json'))
         .map((f: any) => ({ id: f.id, name: f.name.replace(/\.json$/, '') }));
@@ -535,10 +531,9 @@ const Jobs = () => {
     try {
       setTemplatesLoading(true);
       const pathParam = decodePathId(fileId);
-      const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(pathParam)}`, { credentials: 'include' });
-      if (!res.ok) throw new Error(`Error ${res.status}`);
-      const data = await res.json();
-      const json = JSON.parse(base64ToUtf8(data.contentBase64 || 'e30='));
+  const res = await fetch(`/api/v1/user/file?path=${encodeURIComponent(pathParam)}`, { credentials: 'include' });
+  const data = await parseApiResponse(res as any);
+  const json = JSON.parse(base64ToUtf8(data.contentBase64 || 'e30='));
       setTabValue('submit');
       setJobName(json.name || '');
       setCpus(json.cpus != null ? String(json.cpus) : '');

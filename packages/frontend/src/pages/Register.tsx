@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import parseApiResponse from '../lib/fetcher';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -110,7 +111,7 @@ export default function Register() {
           setUsernameAvailable(null);
           return;
         }
-        const body = await res.json();
+        const body = await parseApiResponse(res as any);
         setUsernameAvailable(Boolean(body.available));
       } catch (e) {
         setUsernameAvailable(null);
