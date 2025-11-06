@@ -117,6 +117,44 @@ case "$ACTION" in
             echo "-> Nivel de Admin Slurm establecido a 'Administrator' porque la cuenta es 'admin'."
         fi
         echo "✅ Usuario '$USERNAME' creado exitosamente."
+        mkdir -p /hpc-home/$USERNAME/Prueba
+        cat <<EOF | tee /hpc-home/$USERNAME/Prueba/omp_test.c
+#include <stdio.h>
+#include <omp.h>
+
+int main() {
+    int nthreads = 0;
+    #pragma omp parallel
+    {
+        #pragma omp master
+        {
+            nthreads = omp_get_num_threads();
+            printf("Número de hilos (dentro): %d\n", nthreads);
+        }
+        int tid = omp_get_thread_num();
+        printf("Hola desde tid %d\n", tid);
+    }
+    return 0;
+}
+EOF
+        cat <<EOF | tee /hpc-home/$USERNAME/Prueba/sbatch_omp_c.sh
+set -euo pipefail
+
+echo "Job started on $(hostname) at $(date)"
+echo "SLURM_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK"
+
+cd /hpc-home/$USERNAME/Prueba/
+
+gcc -fopenmp omp_test.c -o omp_test
+
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
+
+./omp_test
+
+echo "Job finished at $(date)"
+
+EOF
+        chown -R $USERNAME /hpc-home/$USERNAME/Prueba
         ;;
 
     show)
