@@ -504,6 +504,7 @@ filesRouter.post('/upload', authenticateToken, async (req, res) => {
 });
 
 // Create a directory
+// Create a directory
 filesRouter.post('/folder', authenticateToken, async (req, res) => {
     const username = req.user.sub;
     const isAdmin = req.user.role === 'admin';
@@ -524,6 +525,56 @@ filesRouter.post('/folder', authenticateToken, async (req, res) => {
     } catch (err) {
         console.error('Error in POST /folder:', err.message);
         return res.status(400).json({ success: false, message: err.message });
+    }
+});
+
+// Search files/folders recursively under a base path (defaults to user's home)
+// GET /api/v1/user/search?q=term[&path=/hpc-home/user][&type=file|folder|any][&max=100]
+filesRouter.get('/search', authenticateToken, async (req, res) => {
+    const username = req.user.sub;
+    const isAdmin = req.user.role === 'admin';
+    const q = (req.query.q || '').toString().trim();
+    let requestedBase = (req.query.path || '').toString().trim() || path.join(USER_ROOT_PREFIX, username);
+    const type = (req.query.type || 'any').toString();
+    const max = Math.max(1, Math.min(parseInt(req.query.max, 10) || 100, 500));
+    const maxDepth = Math.max(1, Math.min(parseInt(req.query.depth, 10) || 6, 15));
+
+    if (!q || q.length < 2) {
+        return res.status(400).json({ success: false, message: 'Query q must be at least 2 characters.' });
+    }
+
+    try {
+        // Verify base path within user's scope
+        const basePath = normalizeAndVerifyPath(username, requestedBase, isAdmin);
+        // Reject if path does not exist or is not a directory
+        if (!fs.existsSync(basePath) || !fs.statSync(basePath).isDirectory()) {
+            return res.status(400).json({ success: false, message: 'Base path is not a directory.' });
+        }
+
+        // Build safe find command
+        const safeQ = q.replace(/[^a-zA-Z0-9_.\-\s]/g, ''); // allow basic characters only
+        const pattern = `*${safeQ}*`;
+        const typeArg = type === 'file' ? '-type f' : (type === 'folder' ? '-type d' : '');
+        // Quote arguments to reduce injection risk
+        const cmd = `find ${basePath.replace(/"/g, '\"')} -maxdepth ${maxDepth} ${typeArg} -iname "${pattern.replace(/"/g, '\"')}" 2>/dev/null | head -n ${max}`;
+
+        const out = execSync(cmd, { encoding: 'utf8' });
+        const lines = out.split('\n').map(l => l.trim()).filter(Boolean);
+        const results = lines.map(p => {
+            const st = fs.existsSync(p) ? fs.statSync(p) : null;
+            const isDir = st ? st.isDirectory() : p.endsWith('/');
+            return {
+                path: p,
+                id: Buffer.from(p).toString('base64'),
+                name: path.basename(p),
+                type: isDir ? 'folder' : 'file'
+            };
+        });
+
+        return res.json({ success: true, base: basePath, q: safeQ, results });
+    } catch (err) {
+        console.error('Search error:', err);
+        return res.status(500).json({ success: false, message: 'Search failed.' });
     }
 });
 
@@ -641,9 +692,12 @@ jobsRouter.post('/jobs', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: 'Provide scriptContent (text) or scriptBase64 or scriptPath' });
         }
 
-        // Directorio de trabajo en el home del usuario compartido
-        const workdir = path.join('/hpc-home', username, 'jobs');
-        try { await fs.promises.mkdir(workdir, { recursive: true }); } catch (_) {}
+    // Directorio de trabajo en el home del usuario compartido
+    const workdir = path.join('/hpc-home', username, 'jobs');
+    try { await fs.promises.mkdir(workdir, { recursive: true }); } catch (_) {}
+    // Subcarpeta para resultados (.out y .err)
+    const resultsDir = path.join(workdir, 'resultados');
+    try { await fs.promises.mkdir(resultsDir, { recursive: true }); } catch (_) {}
 
         // Crear archivo de script si viene contenido
         let scriptFile = scriptPath || null;
@@ -693,8 +747,9 @@ jobsRouter.post('/jobs', authenticateToken, async (req, res) => {
             if (account) p.push('--account', String(account));
             if (qos) p.push('--qos', String(qos));
             if (walltime) p.push('--time', String(walltime)); // HH:MM:SS o D-HH:MM:SS
-            p.push('--output', `'${path.join(workdir, '%x-%j.out')}'`);
-            p.push('--error', `'${path.join(workdir, '%x-%j.err')}'`);
+            // Guardar archivos de salida y error en la subcarpeta "resultados"
+            p.push('--output', `'${path.join(resultsDir, '%x-%j.out')}'`);
+            p.push('--error', `'${path.join(resultsDir, '%x-%j.err')}'`);
             p.push(`'${scriptFile.replace(/'/g, "'\\''")}'`);
             return p.join(' ');
         };

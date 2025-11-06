@@ -13,7 +13,7 @@ const sharedLibsPath = path.join(__dirname, '..', 'shared-libraries');
 const { PunManager } = require(path.join(sharedLibsPath, 'punManager.js'));
 const RedisClient = require(path.join(sharedLibsPath, 'redisClient.js'));
 
-const punDir = '/var/run/atrox-puns'; 
+const punDir = '/var/run/atrox-puns';
 const NGINX_PUNS_ENABLED_DIR = '/etc/nginx/puns-enabled';
 const NGINX_USER_MAP_PATH = '/etc/nginx/user_map.conf';
 
@@ -50,7 +50,7 @@ const authenticateToken = (req, res, next) => {
             return res.status(401).json({ message: 'Invalid token, cookies cleared.' });
         }
         // Si el token es válido, adjuntamos la info del usuario y continuamos al logout
-        req.user = decoded; 
+        req.user = decoded;
         next();
     });
 };
@@ -74,7 +74,7 @@ function getAdminLevelFromSlurm(username) {
             if (code !== 0) {
                 console.error(`Script 'show' for '${username}' failed with code ${code}: ${errorOutput}`);
                 // Si el script falla (ej. usuario no encontrado), asumimos que no es admin.
-                return resolve('None'); 
+                return resolve('None');
             }
             try {
                 const adminLine = output.split('\n').find(line => line.startsWith('adminLevel|'));
@@ -476,7 +476,7 @@ authRouter.post('/login', async (req, res) => {
 
         const userCodePath = path.join(__dirname, '..', 'atrox-user-pun', 'user-server.js');
         const socketPath = path.join(punDir, `${username}.socket`);
-        
+
         try {
             // --- LÓGICA DE ROL DINÁMICA ---
             const adminLevel = await getAdminLevelFromSlurm(username);
@@ -500,7 +500,7 @@ authRouter.post('/login', async (req, res) => {
 
             const nginxUpstreamConfig = `upstream ${username}_pun_backend { server unix:${socketPath}; }`;
 
-            const activePuns = punManager.getActivePuns(); 
+            const activePuns = punManager.getActivePuns();
             let mapFileContent = '';
             for (const user of activePuns.keys()) {
                 mapFileContent += `${user} "${user}_pun_backend";\n`;
@@ -602,6 +602,62 @@ authRouter.post('/logout', authenticateToken, async (req, res) => {
 
 // mount auth router
 app.use('/api/v1/auth', authRouter);
+// Mount dashboard router
+// (mounted later)
+
+// Generic GET proxy for user PUN endpoints (ensures new PUN routes are reachable without extra gateway wiring)
+app.get('/api/v1/user/*', async (req, res) => {
+    const token = req.cookies.access_token;
+    if (!token) return res.status(401).json({ success:false, message: 'No session token' });
+    let decoded = null;
+    try {
+        decoded = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+        return res.status(401).json({ success:false, message: 'Invalid session token' });
+    }
+
+    const username = decoded.sub;
+    if (!username) return res.status(400).json({ success:false, message: 'Invalid token: missing username' });
+
+    try {
+        const activePuns = punManager.getActivePuns();
+        const punInfo = activePuns.get(username);
+        if (!punInfo || !punInfo.socketPath) {
+            return res.status(503).json({ success:false, message: 'User PUN not available' });
+        }
+
+        const http = require('http');
+        const options = {
+            socketPath: punInfo.socketPath,
+            path: req.originalUrl,
+            method: 'GET',
+            headers: {
+                'Cookie': `access_token=${token}`
+            },
+            timeout: 5000
+        };
+
+        const udsReq = http.request(options, (udsRes) => {
+            let body = '';
+            udsRes.on('data', (chunk) => { body += chunk.toString(); });
+            udsRes.on('end', () => {
+                // Try to forward content-type; fallback to json
+                const ctype = udsRes.headers['content-type'] || 'application/json; charset=utf-8';
+                res.status(udsRes.statusCode || 200).set('content-type', ctype).send(body);
+            });
+        });
+        udsReq.on('error', (err) => {
+            return res.status(502).json({ success:false, message: 'Failed to reach PUN', detail: err.message });
+        });
+        udsReq.on('timeout', () => {
+            udsReq.destroy();
+            return res.status(504).json({ success:false, message: 'PUN request timed out' });
+        });
+        udsReq.end();
+    } catch (e) {
+        return res.status(500).json({ success:false, message: 'Internal server error' });
+    }
+});
 
 // Dashboard router: sirve estadísticas globales para admins y proxifica a PUNs para usuarios
 const dashboardRouter = express.Router();
@@ -670,7 +726,7 @@ dashboardRouter.get('/stats', async (req, res) => {
             },
             timeout: 5000
         };
-        
+
         // For non-admin users, we still want to include global node summaries (state per node)
         // but we must not expose privileged per-node compute details. Build a lightweight nodes list
         // from sinfo (name + state) and merge it into the proxied response.
