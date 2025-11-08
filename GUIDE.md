@@ -319,10 +319,3 @@ Revision según la licencia que trae el repositorio (ver `LICENSE` en `/atrox-ga
 Para cualquier duda sobre este README, pasos de empaquetado o problemas de provisioning, abrir un issue en el repo o contactar al mantenedor principal del proyecto.
 
 ---
-
-Hecho: generado README en la raíz del workspace con la guía completa. Si querés, puedo:
-- Añadir un `README.boxes.md` más corto enfocado solamente en el proceso de bake/packaging.
-- Crear un script `scripts/make_box.sh` que automatice los pasos (con checks y prompts seguros para variables de entorno).
-- Incluir enlaces directos a cada archivo editado o generar un resumen de diffs aplicados durante la sesión.
-
-¿Qué querés que haga ahora? (p. ej., crear el script de automatización, o añadir tests de humo automatizados).
